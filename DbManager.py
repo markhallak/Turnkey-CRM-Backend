@@ -498,6 +498,9 @@ CREATE INDEX IF NOT EXISTS idx_message_project_created_at ON message(project_id,
 CREATE INDEX IF NOT EXISTS idx_quote_project_created_at ON quote(project_id, created_at DESC) WHERE is_deleted = FALSE;
 CREATE INDEX IF NOT EXISTS idx_document_project_created_at ON document(project_id, created_at DESC) WHERE is_deleted = FALSE;
 CREATE INDEX IF NOT EXISTS idx_client_cursor ON client (created_at DESC, id DESC) WHERE is_deleted = FALSE;
+CREATE INDEX IF NOT EXISTS idx_invoice_client_created_at ON invoice(client_id, created_at DESC) WHERE is_deleted = FALSE;
+CREATE INDEX IF NOT EXISTS idx_document_client_created_at ON document(client_id, created_at DESC) WHERE is_deleted = FALSE;
+CREATE INDEX IF NOT EXISTS idx_project_client_created_at ON project(client_id, created_at DESC) WHERE is_deleted = FALSE;
 
 
 -- GIN indexes on search_text
