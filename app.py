@@ -328,18 +328,14 @@ async def getProjectTrades(conn: Connection = Depends(get_conn)):
 
 
 ################################################################################
-#                             PROJECT VIEW ENDPOINTS                          #
-#   /fetch_project    Fetch single project by ID                               #
-#   /get_messages     Fetch messages for a project                             #
+# TODO:                        PROJECT VIEW ENDPOINTS                          #
 ################################################################################
 @app.get("/fetch-project")
 async def fetchProject(
         project_id: str = Query(..., description="Project UUID"),
         conn: Connection = Depends(get_conn)
 ):
-    """
-    Fetch a single project’s details (all lookup fields included).
-    """
+
     sql = """
         SELECT
           p.id,
@@ -396,7 +392,6 @@ async def fetchProject(
           p.is_deleted
         FROM project p
 
-          -- “Client” is stored as a user ID; to get the client’s company, we must join:
           JOIN "user" cu
             ON cu.id = p.client_id
            AND cu.is_deleted = FALSE
@@ -448,9 +443,7 @@ async def getMessages(
         size: int = Query(..., gt=0, description="Number of messages to return"),
         conn: Connection = Depends(get_conn)
 ):
-    """
-    Fetch the latest messages for a project (no assignee/type filtering).
-    """
+
     sql = """
             SELECT
               m.id,
@@ -492,10 +485,7 @@ async def fetchProjectSite(
         project_id: str = Query(..., description="Project UUID"),
         conn: Connection = Depends(get_conn)
 ):
-    """
-    Return the Site Information (address_line1, address_line2, city, state, zip_code)
-    for a given project, looked up by project.id.
-    """
+
     sql = """
         SELECT
           p.id                   AS project_id,
@@ -529,9 +519,7 @@ async def fetchProjectSowEndpoint(
         project_id: str = Query(..., description="Project UUID"),
         conn: Connection = Depends(get_conn)
 ):
-    """
-    Fetch “Scope of Work” and “Special Notes” for a specific project.
-    """
+
     sql = """
         SELECT
           p.id                AS project_id,
@@ -597,10 +585,6 @@ async def fetchProjectQuotesEndpoint(
     }
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# GET /fetch_project_documents?project_id=...
-# Returns a list of documents (title, type, date uploaded)
-# ──────────────────────────────────────────────────────────────────────────────
 @app.get("/fetch-project-documents")
 async def fetchProjectDocumentsEndpoint(
         project_id: str = Query(..., description="Project UUID"),
@@ -638,10 +622,7 @@ async def fetchProjectDocumentsEndpoint(
 
 
 ################################################################################
-#                              CLIENTS PAGE ENDPOINTS                         #
-#   /get_clients                                                            #
-#   /get_client_types                                                       #
-#   /get_client_statuses                                                     #
+# TODO:                         CLIENTS PAGE ENDPOINTS                         #
 ################################################################################
 
 @app.get("/get-clients")
