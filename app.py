@@ -91,7 +91,8 @@ async def getNotifications(
 
     sql = """
     SELECT
-      n.*
+      n.*,
+      COUNT(*) OVER() AS total_count
     FROM notification n
     WHERE (n.created_at, n.id) < ($1::timestamptz, $2::uuid)
     ORDER BY n.created_at DESC, n.id DESC
@@ -102,6 +103,8 @@ async def getNotifications(
         rows = await conn.fetch(sql, cursor_ts, cursor_id, size)
     except Exception as e:
         raise HTTPException(500, detail=str(e))
+
+    total = rows[0]["total_count"] if rows else 0
 
 
     if rows:
@@ -114,6 +117,7 @@ async def getNotifications(
 
     return {
         "notifications": [dict(r) for r in rows],
+        "total_count": total,
         "page_size": size,
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
@@ -499,7 +503,8 @@ async def getMessages(
               u.first_name  AS sender_first_name,
               u.last_name   AS sender_last_name,
               ut.name       AS sender_type,
-              m.file_attachment_id
+              m.file_attachment_id,
+              COUNT(*) OVER() AS total_count
             FROM message m
             JOIN project p
               ON p.id = m.project_id
@@ -523,6 +528,8 @@ async def getMessages(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+    total = rows[0]["total_count"] if rows else 0
+
     if rows:
         last = rows[-1]
         next_ts = last["created_at"].isoformat()
@@ -533,6 +540,7 @@ async def getMessages(
 
     return {
         "messages": [dict(r) for r in rows],
+        "total_count": total,
         "page_size": size,
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
@@ -577,7 +585,8 @@ async def fetchProjectQuotesEndpoint(
           q.number             AS number,
           q.created_at         AS date_created,
           q.amount             AS amount,
-          s.value              AS status_value
+          s.value              AS status_value,
+          COUNT(*) OVER()      AS total_count
         FROM quote q
         JOIN status s
           ON s.id = q.status_id
@@ -595,6 +604,8 @@ async def fetchProjectQuotesEndpoint(
         rows = await conn.fetch(sql, project_id, cursor_ts, cursor_id, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    total = rows[0]["total_count"] if rows else 0
 
     if rows:
         last = rows[-1]
@@ -615,6 +626,7 @@ async def fetchProjectQuotesEndpoint(
             }
             for r in rows
         ],
+        "total_count": total,
         "page_size": size,
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
@@ -655,7 +667,8 @@ async def fetchProjectDocumentsEndpoint(
           d.id                  AS document_id,
           d.file_name           AS file_name,
           d.file_extension      AS type,
-          d.created_at          AS date_uploaded
+          d.created_at          AS date_uploaded,
+          COUNT(*) OVER()       AS total_count
         FROM document d
         WHERE
           d.project_id = $1
@@ -688,6 +701,7 @@ async def fetchProjectDocumentsEndpoint(
             }
             for r in rows
         ],
+        "total_count": total,
         "page_size": size,
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
@@ -882,7 +896,8 @@ async def fetchClientInvoices(
           i.created_at    AS date_created,
           i.issuance_date AS issuance_date,
           i.amount        AS amount,
-          s.value         AS status_value
+          s.value         AS status_value,
+          COUNT(*) OVER() AS total_count
         FROM invoice i
         JOIN status s ON s.id = i.status_id AND s.category = 'invoice' AND s.is_deleted = FALSE
         WHERE
@@ -898,6 +913,8 @@ async def fetchClientInvoices(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+    total = rows[0]["total_count"] if rows else 0
+
     if rows:
         last = rows[-1]
         next_ts = last["created_at"].isoformat()
@@ -908,6 +925,7 @@ async def fetchClientInvoices(
 
     return {
         "invoices": [dict(r) for r in rows],
+        "total_count": total,
         "page_size": size,
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
@@ -948,7 +966,8 @@ async def fetchClientOnboardingDocuments(
           d.id             AS document_id,
           d.file_name      AS file_name,
           d.file_extension AS type,
-          d.created_at     AS date_uploaded
+          d.created_at     AS date_uploaded,
+          COUNT(*) OVER()  AS total_count
         FROM document d
         WHERE
           d.client_id = $1
@@ -963,6 +982,8 @@ async def fetchClientOnboardingDocuments(
         rows = await conn.fetch(sql, client_id, cursor_ts, cursor_id, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    total = rows[0]["total_count"] if rows else 0
 
     if rows:
         last = rows[-1]
@@ -982,6 +1003,7 @@ async def fetchClientOnboardingDocuments(
             }
             for r in rows
         ],
+        "total_count": total,
         "page_size": size,
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
@@ -1023,7 +1045,8 @@ async def fetchClientProjects(
           p.business_name AS business_name,
           p.created_at    AS date_created,
           p.due_date      AS due_date,
-          s.value         AS status_value
+          s.value         AS status_value,
+          COUNT(*) OVER() AS total_count
         FROM project p
         JOIN status s ON s.id = p.status_id AND s.category = 'project' AND s.is_deleted = FALSE
         WHERE
@@ -1050,6 +1073,7 @@ async def fetchClientProjects(
 
     return {
         "projects": [dict(r) for r in rows],
+        "total_count": total,
         "page_size": size,
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
@@ -1063,6 +1087,100 @@ async def fetchClientProjects(
 
 
 
+@app.get("/get-billings")
+async def getBillings(
+        size: int = Query(..., gt=0, description="Number of invoices per page"),
+        lastSeenCreatedAt: Optional[str] = Query(
+            None,
+            description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
+        ),
+        lastSeenId: Optional[UUID] = Query(
+            None,
+            description="UUID cursor to break ties if multiple rows share the same timestamp"
+        ),
+        conn: Connection = Depends(get_conn)
+):
+    if lastSeenCreatedAt:
+        try:
+            dt = datetime.fromisoformat(lastSeenCreatedAt)
+            cursorTs = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid timestamp: '{lastSeenCreatedAt}'"
+            )
+    else:
+        cursorTs = datetime.now(timezone.utc)
+
+    maxUuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    cursorId = lastSeenId or maxUuid
+
+    sql = """
+        SELECT
+          i.id,
+          i.number,
+          i.issuance_date,
+          i.due_date,
+          i.amount,
+          s.value        AS status_value,
+          d.file_url,
+          d.file_name,
+          d.file_extension,
+          i.created_at,
+          COUNT(*) OVER() AS total_count
+        FROM invoice i
+        JOIN status s
+          ON s.id = i.status_id
+         AND s.category = 'billing'
+         AND s.is_deleted = FALSE
+        LEFT JOIN document d
+          ON d.id = i.file_id
+         AND d.is_deleted = FALSE
+        WHERE (i.created_at, i.id) < ($1::timestamptz, $2::uuid)
+          AND i.is_deleted = FALSE
+        ORDER BY i.created_at DESC, i.id DESC
+        LIMIT $3;
+    """
+
+    try:
+        rows = await conn.fetch(sql, cursorTs, cursorId, size)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    total = rows[0]["total_count"] if rows else 0
+
+    if rows:
+        last = rows[-1]
+        nextTs = last["created_at"].isoformat()
+        nextId = str(last["id"])
+    else:
+        nextTs = None
+        nextId = None
+
+    return {
+        "billings": [dict(r) for r in rows],
+        "total_count": total,
+        "page_size": size,
+        "last_seen_created_at": nextTs,
+        "last_seen_id": nextId,
+    }
+
+
+@app.get("/get-billing-statuses")
+async def getBillingStatuses(conn: Connection = Depends(get_conn)):
+    sql = """
+            SELECT id, value, color
+            FROM status
+            WHERE category = 'billing'
+              AND is_deleted = FALSE
+            ORDER BY value;
+        """
+
+    try:
+        rows = await conn.fetch(sql)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"billing_statuses": [dict(r) for r in rows]}
 
 @app.post("/setup-recovery")
 async def setupRecovery(payload: dict = Body()):
