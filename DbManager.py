@@ -209,8 +209,7 @@ CREATE TABLE IF NOT EXISTS document (
   created_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
   updated_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
   is_deleted     BOOLEAN      NOT NULL DEFAULT FALSE,
-  deleted_at     TIMESTAMPTZ
-  ,
+  deleted_at     TIMESTAMPTZ,
   search_text TEXT
 );
 """
