@@ -681,6 +681,13 @@ async def getClientStatuses(conn: Connection = Depends(get_conn)):
     return {"client_statuses": [dict(r) for r in rows]}
 
 
+################################################################################
+# TODO:                         CLIENTS VIEW ENDPOINTS                         #
+################################################################################
+
+
+
+
 @app.post("/setup-recovery")
 async def setupRecovery(payload: dict = Body()):
     userId = payload['userId']
