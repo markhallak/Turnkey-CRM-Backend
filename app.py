@@ -327,6 +327,22 @@ async def getProjectTrades(conn: Connection = Depends(get_conn)):
     return {"project_trades": [dict(r) for r in rows]}
 
 
+@app.get("/get-project-priorities")
+async def getProjectPriorities(conn: Connection = Depends(get_conn)):
+    sql = """
+            SELECT id, value, color
+            FROM project_priority
+            WHERE is_deleted = FALSE
+            ORDER BY value;
+        """
+
+    try:
+        rows = await conn.fetch(sql)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"project_priorities": [dict(r) for r in rows]}
+
+
 ################################################################################
 # TODO:                        PROJECT VIEW ENDPOINTS                          #
 ################################################################################
@@ -344,6 +360,7 @@ async def fetchProject(
           -- The “client” for a project is actually stored as a user → then join client:
           p.client_id                            AS client_user_id,
           cu.first_name || ' ' || cu.last_name   AS client_user_name,
+          cut.name                               AS client_user_type,
           c.id                                    AS client_id,
           c.company_name                          AS client_company_name,
 
@@ -396,9 +413,14 @@ async def fetchProject(
             ON cu.id = p.client_id
            AND cu.is_deleted = FALSE
 
-          JOIN client c
+          JOIN user_type cut
+            ON cut.id = cu.type_id
+           AND cut.is_deleted = FALSE
+
+          LEFT JOIN client c
             ON c.id = cu.client_id
            AND c.is_deleted = FALSE
+           AND cut.name = 'client'
 
           JOIN project_priority pp
             ON pp.id = p.priority_id
@@ -441,8 +463,31 @@ async def fetchProject(
 async def getMessages(
         projectId: str = Query(..., description="Project UUID"),
         size: int = Query(..., gt=0, description="Number of messages to return"),
+        last_seen_created_at: Optional[str] = Query(
+            None,
+            description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
+        ),
+        last_seen_id: Optional[UUID] = Query(
+            None,
+            description="UUID cursor to break ties if multiple rows share the same timestamp"
+        ),
         conn: Connection = Depends(get_conn)
 ):
+
+    if last_seen_created_at:
+        try:
+            dt = datetime.fromisoformat(last_seen_created_at)
+            cursor_ts = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid timestamp: '{last_seen_created_at}'"
+            )
+    else:
+        cursor_ts = datetime.now(timezone.utc)
+
+    max_uuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    cursor_id = last_seen_id or max_uuid
 
     sql = """
             SELECT
@@ -468,79 +513,33 @@ async def getMessages(
             WHERE
               m.is_deleted    = FALSE
               AND m.project_id = $1
-            ORDER BY m.created_at DESC
-            LIMIT $2;
+              AND (m.created_at, m.id) < ($2::timestamptz, $3::uuid)
+            ORDER BY m.created_at DESC, m.id DESC
+            LIMIT $4;
         """
 
     try:
-        rows = await conn.fetch(sql, projectId, size)
+        rows = await conn.fetch(sql, projectId, cursor_ts, cursor_id, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return {"messages": [dict(r) for r in rows]}
-
-
-@app.get("/fetch-project-site")
-async def fetchProjectSite(
-        project_id: str = Query(..., description="Project UUID"),
-        conn: Connection = Depends(get_conn)
-):
-
-    sql = """
-        SELECT
-          p.id                   AS project_id,
-          p.address_line1        AS address_line1,
-          p.address_line2        AS address_line2,
-          p.city,
-
-          p.state_id,
-          st.name                AS state_name,
-
-          p.zip_code
-        FROM project p
-        JOIN state st
-          ON st.id = p.state_id
-         AND st.is_deleted = FALSE
-        WHERE
-          p.id = $1
-          AND p.is_deleted = FALSE;
-        """
-
-    try:
-        row = await conn.fetchrow(sql, project_id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    return {"site": dict(row)}
-
-
-@app.get("/fetch-project-sow")
-async def fetchProjectSowEndpoint(
-        project_id: str = Query(..., description="Project UUID"),
-        conn: Connection = Depends(get_conn)
-):
-
-    sql = """
-        SELECT
-          p.id                AS project_id,
-          p.scope_of_work,
-          p.special_notes
-        FROM project p
-        WHERE
-          p.id         = $1
-          AND p.is_deleted = FALSE;
-        """
-
-    try:
-        row = await conn.fetchrow(sql, project_id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if rows:
+        last = rows[-1]
+        next_ts = last["created_at"].isoformat()
+        next_id = str(last["id"])
+    else:
+        next_ts = None
+        next_id = None
 
     return {
-        "project_id": row["project_id"],
-        "scope_of_work": row["scope_of_work"],
-        "special_notes": row["special_notes"]
+        "messages": [dict(r) for r in rows],
+        "page_size": size,
+        "last_seen_created_at": next_ts,
+        "last_seen_id": next_id,
     }
+
+
+
 
 
 @app.get("/fetch-project-quotes")
