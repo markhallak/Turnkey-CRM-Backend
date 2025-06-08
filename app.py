@@ -311,8 +311,8 @@ async def getProjectTypes(conn: Connection = Depends(get_conn)):
     return {"project_types": [dict(r) for r in rows]}
 
 
-@app.get("/get_project_trades")
-async def get_project_trades(conn=Depends(get_conn)):
+@app.get("/get-project-trades")
+async def getProjectTrades(conn: Connection = Depends(get_conn)):
     sql = """
             SELECT id, value
             FROM project_trade
@@ -332,10 +332,10 @@ async def get_project_trades(conn=Depends(get_conn)):
 #   /fetch_project    Fetch single project by ID                               #
 #   /get_messages     Fetch messages for a project                             #
 ################################################################################
-@app.get("/fetch_project")
-async def fetch_project(
+@app.get("/fetch-project")
+async def fetchProject(
         project_id: str = Query(..., description="Project UUID"),
-        conn=Depends(get_conn)
+        conn: Connection = Depends(get_conn)
 ):
     """
     Fetch a single project’s details (all lookup fields included).
@@ -442,11 +442,11 @@ async def fetch_project(
     return {"project": dict(row)}
 
 
-@app.get("/get_messages")
-async def get_messages(
+@app.get("/get-messages")
+async def getMessages(
         projectId: str = Query(..., description="Project UUID"),
         size: int = Query(..., gt=0, description="Number of messages to return"),
-        conn=Depends(get_conn)
+        conn: Connection = Depends(get_conn)
 ):
     """
     Fetch the latest messages for a project (no assignee/type filtering).
@@ -487,10 +487,10 @@ async def get_messages(
     return {"messages": [dict(r) for r in rows]}
 
 
-@app.get("/fetch_project_site")
-async def fetch_project_site(
+@app.get("/fetch-project-site")
+async def fetchProjectSite(
         project_id: str = Query(..., description="Project UUID"),
-        conn=Depends(get_conn)
+        conn: Connection = Depends(get_conn)
 ):
     """
     Return the Site Information (address_line1, address_line2, city, state, zip_code)
@@ -524,10 +524,10 @@ async def fetch_project_site(
     return {"site": dict(row)}
 
 
-@app.get("/fetch_project_sow")
-async def fetch_project_sow_endpoint(
+@app.get("/fetch-project-sow")
+async def fetchProjectSowEndpoint(
         project_id: str = Query(..., description="Project UUID"),
-        conn=Depends(get_conn)
+        conn: Connection = Depends(get_conn)
 ):
     """
     Fetch “Scope of Work” and “Special Notes” for a specific project.
@@ -555,10 +555,10 @@ async def fetch_project_sow_endpoint(
     }
 
 
-@app.get("/fetch_project_quotes")
-async def fetch_project_quotes_endpoint(
+@app.get("/fetch-project-quotes")
+async def fetchProjectQuotesEndpoint(
         project_id: str = Query(..., description="Project UUID"),
-        conn=Depends(get_conn)
+        conn: Connection = Depends(get_conn)
 ):
     sql = """
         SELECT
@@ -601,10 +601,10 @@ async def fetch_project_quotes_endpoint(
 # GET /fetch_project_documents?project_id=...
 # Returns a list of documents (title, type, date uploaded)
 # ──────────────────────────────────────────────────────────────────────────────
-@app.get("/fetch_project_documents")
-async def fetch_project_documents_endpoint(
+@app.get("/fetch-project-documents")
+async def fetchProjectDocumentsEndpoint(
         project_id: str = Query(..., description="Project UUID"),
-        conn=Depends(get_conn)
+        conn: Connection = Depends(get_conn)
 ):
     sql = """
         SELECT
@@ -644,8 +644,8 @@ async def fetch_project_documents_endpoint(
 #   /get_client_statuses                                                     #
 ################################################################################
 
-@app.get("/get_clients")
-async def get_clients(conn=Depends(get_conn)):
+@app.get("/get-clients")
+async def getClients(conn: Connection = Depends(get_conn)):
     sql = """
             SELECT
               c.id,
@@ -668,8 +668,8 @@ async def get_clients(conn=Depends(get_conn)):
     return {"clients": [dict(r) for r in rows]}
 
 
-@app.get("/get_client_types")
-async def get_client_types(conn=Depends(get_conn)):
+@app.get("/get-client-types")
+async def getClientTypes(conn: Connection = Depends(get_conn)):
     sql = """
             SELECT id, value
             FROM client_type
@@ -685,7 +685,7 @@ async def get_client_types(conn=Depends(get_conn)):
 
 
 @app.get("/get-client-statuses")
-async def getClientStatuses(conn=Depends(get_conn)):
+async def getClientStatuses(conn: Connection = Depends(get_conn)):
     sql = """
             SELECT id, value, color
             FROM status

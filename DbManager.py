@@ -492,6 +492,11 @@ CREATE INDEX IF NOT EXISTS idx_msg_attachment   ON message(file_attachment_id);
 CREATE INDEX IF NOT EXISTS idx_doc_project      ON document(project_id);
 CREATE INDEX IF NOT EXISTS idx_notification_cursor ON notification (created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_status_proj_category_deleted_value ON status (category, is_deleted, value);
+CREATE INDEX IF NOT EXISTS idx_project_trade_deleted_value ON project_trade (is_deleted, value);
+CREATE INDEX IF NOT EXISTS idx_message_project_created_at ON message(project_id, created_at DESC) WHERE is_deleted = FALSE;
+CREATE INDEX IF NOT EXISTS idx_quote_project_created_at ON quote(project_id, created_at DESC) WHERE is_deleted = FALSE;
+CREATE INDEX IF NOT EXISTS idx_document_project_created_at ON document(project_id, created_at DESC) WHERE is_deleted = FALSE;
+CREATE INDEX IF NOT EXISTS idx_client_cursor ON client (created_at DESC, id DESC) WHERE is_deleted = FALSE;
 
 
 -- GIN indexes on search_text
