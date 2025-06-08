@@ -208,6 +208,7 @@ CREATE TABLE IF NOT EXISTS document (
   project_id     UUID         NOT NULL REFERENCES project(id)   ON UPDATE CASCADE ON DELETE RESTRICT,
   created_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
   updated_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  purpose        VARCHAR(100) NOT NULL,
   is_deleted     BOOLEAN      NOT NULL DEFAULT FALSE,
   deleted_at     TIMESTAMPTZ,
   search_text TEXT
