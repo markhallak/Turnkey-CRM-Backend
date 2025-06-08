@@ -245,6 +245,7 @@ INVOICE = """
 CREATE TABLE IF NOT EXISTS invoice (
   id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
   number        INT          GENERATED ALWAYS AS IDENTITY UNIQUE,
+  due_date DATE         NOT NULL,
   issuance_date DATE         NOT NULL,
   created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
