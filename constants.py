@@ -1,0 +1,6 @@
+DB_HOST = "localhost"
+DB_PORT = "5400"
+DB_USER = "postgres"
+DB_PASSWORD = "crm-issam"
+DB_NAME = "postgres"
+DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
