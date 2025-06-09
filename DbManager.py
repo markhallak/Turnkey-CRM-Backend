@@ -19,6 +19,7 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 # ──────────────────────────────────────────────────────────────────────────────
 # 1: STATUS
 # ──────────────────────────────────────────────────────────────────────────────
+
 STATUS = """
 CREATE TABLE IF NOT EXISTS status (
   id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -103,7 +104,6 @@ CREATE TABLE IF NOT EXISTS project_trade (
   deleted_at TIMESTAMPTZ
 );
 """
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 3: USER
@@ -192,7 +192,6 @@ CREATE TABLE IF NOT EXISTS client_rate (
   deleted_at  TIMESTAMPTZ
 );
 """
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 5: DOCUMENT
@@ -290,7 +289,6 @@ CREATE TABLE IF NOT EXISTS message_mention (
 );
 """
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # 9: MAGIC_LINK
 # ──────────────────────────────────────────────────────────────────────────────
@@ -324,7 +322,6 @@ CREATE TABLE IF NOT EXISTS password (
 );
 """
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # 11: STATE
 # ──────────────────────────────────────────────────────────────────────────────
@@ -355,7 +352,110 @@ CREATE TABLE IF NOT EXISTS notification (
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 13: ALTERS (search_text columns)
+# 13: Notification
+# ──────────────────────────────────────────────────────────────────────────────
+
+ONBOARDING = """
+CREATE TABLE IF NOT EXISTS client_onboarding_general (
+  id                          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id                   UUID         NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+  satellite_office_address    VARCHAR(255),
+  organization_type           VARCHAR(100),
+  establishment_year          INT,
+  annual_revenue              NUMERIC,
+  accepted_payment_methods    TEXT,
+  naics_code                  VARCHAR(20),
+  duns_number                 VARCHAR(20),
+  created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
+  deleted_at                  TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS client_onboarding_service (
+  id                          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id                   UUID         NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+  coverage_area               TEXT         COMMENT 'Comma-separated list of cities',
+  admin_staff_count           INT,
+  field_staff_count           INT,
+  licenses                    TEXT         COMMENT 'List of licenses',
+  working_hours               VARCHAR(100),
+  covers_after_hours          BOOLEAN      NOT NULL DEFAULT FALSE,
+  covers_weekend_calls        BOOLEAN      NOT NULL DEFAULT FALSE,
+  created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
+  deleted_at                  TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS client_onboarding_contact (
+  id                          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id                   UUID         NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+  dispatch_supervisor         VARCHAR(255),
+  field_supervisor            VARCHAR(255),
+  management_supervisor       VARCHAR(255),
+  regular_hours_contact       VARCHAR(255) COMMENT 'Email & phone during regular hours',
+  emergency_hours_contact     VARCHAR(255) COMMENT 'Email & phone during emergencies',
+  created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
+  deleted_at                  TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS client_onboarding_load (
+  id                          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id                   UUID         NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+  avg_monthly_tickets_last4   INT          COMMENT 'Average over last 4 months',
+  po_source_split             TEXT         COMMENT 'e.g. "30% Res, 50% Com, 20% Ind"',
+  monthly_po_capacity         INT,
+  created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
+  deleted_at                  TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS client_trade_coverage (
+  id                          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id                   UUID         NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE CASCADE,
+  project_trade_id            UUID         NOT NULL REFERENCES project_trade(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+  coverage_level              VARCHAR(20)  NOT NULL 
+    CHECK (coverage_level IN ('NOT','LIGHT','FULL')),
+  created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
+  deleted_at                  TIMESTAMPTZ,
+  UNIQUE (client_id, project_trade_id)
+);
+
+CREATE TABLE IF NOT EXISTS client_pricing_structure (
+  id                          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id                   UUID         NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE CASCADE,
+  item_label                  VARCHAR(100) NOT NULL,
+  regular_hours_rate          VARCHAR(50),
+  after_hours_rate            VARCHAR(50),
+  is_custom                   BOOLEAN      NOT NULL DEFAULT FALSE,
+  created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
+  deleted_at                  TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS client_references (
+  id                          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id                   UUID         NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE CASCADE,
+  company_name                VARCHAR(255),
+  contact_name                VARCHAR(255),
+  contact_email               VARCHAR(255),
+  contact_phone               VARCHAR(50),
+  created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
+  deleted_at                  TIMESTAMPTZ
+);
+"""
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 14: ALTERS (search_text columns)
 # ──────────────────────────────────────────────────────────────────────────────
 
 ALTERS = """
@@ -368,7 +468,7 @@ ALTER TABLE message  ADD COLUMN IF NOT EXISTS search_text TEXT;
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 14: VIEWS
+# 15: VIEWS
 # ──────────────────────────────────────────────────────────────────────────────
 
 VIEWS = """
@@ -433,7 +533,7 @@ CREATE OR REPLACE VIEW global_search AS
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 15: PREPARES
+# 16: PREPARES
 # ──────────────────────────────────────────────────────────────────────────────
 
 PREPARES = """
@@ -457,7 +557,7 @@ LIMIT $2;
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 16: INDICES
+# 17: INDICES
 # ──────────────────────────────────────────────────────────────────────────────
 
 INDICES = """
@@ -514,7 +614,7 @@ CREATE INDEX IF NOT EXISTS idx_message_search_text   ON message   USING GIN (sea
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 17: FUNCTIONS
+# 18: FUNCTIONS
 # ──────────────────────────────────────────────────────────────────────────────
 
 FUNCTIONS = """
@@ -584,7 +684,7 @@ $$;
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 18: TRIGGERS
+# 19: TRIGGERS
 # ──────────────────────────────────────────────────────────────────────────────
 
 TRIGGERS = """-- 1) Project: split INSERT vs. UPDATE so we don’t reference OLD in INSERT
