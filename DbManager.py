@@ -314,12 +314,29 @@ PASSWORD = """
 CREATE TABLE IF NOT EXISTS password (
   user_id               UUID        PRIMARY KEY
     REFERENCES "user"(id) ON DELETE CASCADE,
+  client_id             UUID        NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE CASCADE,
   encrypted_password    BYTEA       NOT NULL,
   iv                    BYTEA       NOT NULL,
   salt                  BYTEA       NOT NULL,
   kdf_params            JSONB       NOT NULL,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+INSURANCE = """
+CREATE TABLE IF NOT EXISTS insurance (
+  id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id       UUID         NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+  provider        VARCHAR(255),
+  policy_number   VARCHAR(255),
+  coverage_amount NUMERIC,
+  start_date      DATE,
+  end_date        DATE,
+  created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  is_deleted      BOOLEAN      NOT NULL DEFAULT FALSE,
+  deleted_at      TIMESTAMPTZ
 );
 """
 
@@ -826,6 +843,7 @@ async def create_tables():
             ("message_mention", MESSAGE_MENTION),
             ("magic_link", MAGIC_LINK),
             ("password", PASSWORD),
+            ("insurance", INSURANCE),
             ("notification", NOTIFICATION),
             ("state", STATE),
             ("alter", ALTERS),
