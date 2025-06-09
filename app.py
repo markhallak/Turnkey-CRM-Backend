@@ -35,6 +35,16 @@ async def get_conn(db_pool: Pool = Depends(get_db_pool)):
         yield conn
 
 
+async def uploadDocument(fileBlob: bytes) -> dict:
+    """Placeholder for uploading files to storage bucket."""
+    return {
+        "file_name": "placeholder.pdf",
+        "file_url": "https://example.com/placeholder.pdf",
+        "file_extension": "pdf",
+        "file_size": len(fileBlob or b""),
+    }
+
+
 ################################################################################
 # TODO:                           HEADER ENDPOINTS                             #
 ################################################################################
@@ -341,6 +351,85 @@ async def getProjectPriorities(conn: Connection = Depends(get_conn)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"project_priorities": [dict(r) for r in rows]}
+
+
+@app.post("/create-new-project")
+async def createNewProject(
+        payload: dict = Body(...),
+        conn: Connection = Depends(get_conn)
+):
+    clientId = payload.get("client")
+    businessName = payload.get("businessName")
+    dateReceived = payload.get("dateReceived")
+    priorityValue = payload.get("priority")
+    dueDate = payload.get("dueDate")
+    tradeValue = payload.get("trade")
+    nte = payload.get("nte")
+    assigneeId = payload.get("assignee")
+    address1 = payload.get("address1")
+    address2 = payload.get("address2")
+    city = payload.get("city")
+    stateName = payload.get("state")
+    zipCode = payload.get("zipCode")
+    scopeOfWork = payload.get("scopeOfWork")
+    specialNotes = payload.get("specialNotes")
+
+    if not all([clientId, businessName, dateReceived]):
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
+    address = f"{address1} {address2 or ''} {city} {stateName} {zipCode}".strip()
+
+    async with conn.transaction():
+        priorityId = await conn.fetchval(
+            "SELECT id FROM project_priority WHERE value=$1 AND is_deleted=FALSE LIMIT 1;",
+            priorityValue,
+        )
+        tradeId = await conn.fetchval(
+            "SELECT id FROM project_trade WHERE value=$1 AND is_deleted=FALSE LIMIT 1;",
+            tradeValue,
+        )
+        stateId = await conn.fetchval(
+            "SELECT id FROM state WHERE name=$1 AND is_deleted=FALSE LIMIT 1;",
+            stateName,
+        )
+        typeId = await conn.fetchval(
+            "SELECT id FROM project_type WHERE is_deleted=FALSE LIMIT 1;"
+        )
+        statusId = await conn.fetchval(
+            "SELECT id FROM status WHERE category='project' AND value='Open' AND is_deleted=FALSE LIMIT 1;"
+        )
+        projectId = await conn.fetchval(
+            """
+            INSERT INTO project (
+              client_id, priority_id, type_id, address, address_line1, address_line2,
+              city, state_id, zip_code, trade_id, status_id, nte, business_name,
+              due_date, date_received, scope_of_work, special_notes, visit_notes,
+              planned_resolution, material_parts_needed, assignee_id
+            ) VALUES (
+              $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'','','',$18
+            ) RETURNING id;
+            """,
+            clientId,
+            priorityId,
+            typeId,
+            address,
+            address1,
+            address2,
+            city,
+            stateId,
+            zipCode,
+            tradeId,
+            statusId,
+            nte,
+            businessName,
+            dueDate,
+            dateReceived,
+            scopeOfWork,
+            specialNotes,
+            assigneeId,
+        )
+
+    return {"projectId": projectId}
 
 
 ################################################################################
@@ -814,6 +903,91 @@ async def getClientStatuses(conn: Connection = Depends(get_conn)):
     return {"client_statuses": [dict(r) for r in rows]}
 
 
+@app.post("/create-new-client")
+async def createNewClient(
+        payload: dict = Body(...),
+        conn: Connection = Depends(get_conn)
+):
+    companyName = payload.get("companyName")
+    pocFirstName = payload.get("POCFirstName")
+    pocLastName = payload.get("POCLastName")
+    clientType = payload.get("type")
+    onboardingEmail = payload.get("onBoardingEmail")
+    phoneNumber = payload.get("phoneNumber")
+    accountingEmail = payload.get("accountingEmail")
+    accountingPhone = payload.get("accountingPhoneNumber")
+    payTerms = payload.get("payterms")
+    address1 = payload.get("address1")
+    address2 = payload.get("address2")
+    city = payload.get("city")
+    stateName = payload.get("state")
+    zipCode = payload.get("zipCode")
+    tripRate = payload.get("tripRate")
+
+    if not all([companyName, pocFirstName, pocLastName]):
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
+    async with conn.transaction():
+        typeId = await conn.fetchval(
+            "SELECT id FROM client_type WHERE value=$1 AND is_deleted=FALSE LIMIT 1;",
+            clientType,
+        )
+        stateId = await conn.fetchval(
+            "SELECT id FROM state WHERE name=$1 AND is_deleted=FALSE LIMIT 1;",
+            stateName,
+        )
+        statusId = await conn.fetchval(
+            "SELECT id FROM status WHERE category='client' AND value='Active' AND is_deleted=FALSE LIMIT 1;"
+        )
+        clientId = await conn.fetchval(
+            """
+            INSERT INTO client (
+              company_name, poc_first_name, poc_last_name, type_id, status_id,
+              address_line_1, address_line_2, city, state_id, zip_code,
+              general_onboarding_email, phone_number_main_line, accounting_email,
+              accounting_phone_number, pay_terms, trip_rate, updates, special_notes
+            ) VALUES (
+              $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'',''
+            ) RETURNING id;
+            """,
+            companyName,
+            pocFirstName,
+            pocLastName,
+            typeId,
+            statusId,
+            address1,
+            address2,
+            city,
+            stateId,
+            zipCode,
+            onboardingEmail,
+            phoneNumber,
+            accountingEmail,
+            accountingPhone,
+            payTerms,
+            tripRate,
+        )
+
+        rates = {
+            "handyman": payload.get("hourlyRateHandyMan"),
+            "helper": payload.get("hourlyRateHelper"),
+            "electrical": payload.get("hourlyRateElectrical"),
+            "plumbing": payload.get("hourlyRatePlumbing"),
+            "hvac": payload.get("hourlyRateHVAC"),
+        }
+        for rateType, amount in rates.items():
+            if not amount:
+                continue
+            await conn.execute(
+                "INSERT INTO client_rate (client_id, rate_type, rate_amount) VALUES ($1,$2,$3);",
+                clientId,
+                rateType,
+                amount,
+            )
+
+    return {"clientId": clientId}
+
+
 ################################################################################
 # TODO:                         CLIENTS VIEW ENDPOINTS                         #
 ################################################################################
@@ -1174,6 +1348,109 @@ async def getBillingStatuses(conn: Connection = Depends(get_conn)):
     return {"billing_statuses": [dict(r) for r in rows]}
 
 
+@app.post("/create-new-invoice")
+async def createNewInvoice(
+        payload: dict = Body(...),
+        conn: Connection = Depends(get_conn)
+):
+    clientId = payload.get("clientId")
+    amount = payload.get("amount")
+    dueDate = payload.get("dueDate")
+    issuanceDate = payload.get("issuanceDate")
+    fileBlob = payload.get("fileBlob", b"")
+
+    if not clientId or not isUUIDv4(clientId):
+        raise HTTPException(status_code=400, detail="Invalid clientId")
+
+    docInfo = await uploadDocument(fileBlob)
+
+    async with conn.transaction():
+        documentId = await conn.fetchval(
+            """
+            INSERT INTO document (
+              file_name, file_url, file_extension, file_size, client_id, purpose
+            ) VALUES ($1,$2,$3,$4,$5,'invoice') RETURNING id;
+            """,
+            docInfo["file_name"],
+            docInfo["file_url"],
+            docInfo["file_extension"],
+            docInfo["file_size"],
+            clientId,
+        )
+
+        statusId = await conn.fetchval(
+            "SELECT id FROM status WHERE category='billing' AND value='Pending' AND is_deleted=FALSE LIMIT 1;"
+        )
+
+        invoiceId = await conn.fetchval(
+            """
+            INSERT INTO invoice (
+              due_date, issuance_date, amount, client_id, status_id, file_id
+            ) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id;
+            """,
+            dueDate,
+            issuanceDate,
+            amount,
+            clientId,
+            statusId,
+            documentId,
+        )
+
+    return {"invoiceId": invoiceId}
+
+
+@app.post("/create-new-quote")
+async def createNewQuote(
+        payload: dict = Body(...),
+        conn: Connection = Depends(get_conn)
+):
+    projectId = payload.get("projectId")
+    clientId = payload.get("clientId")
+    amount = payload.get("amount")
+    fileBlob = payload.get("fileBlob", b"")
+
+    if not projectId or not isUUIDv4(projectId):
+        raise HTTPException(status_code=400, detail="Invalid projectId")
+    if not clientId or not isUUIDv4(clientId):
+        raise HTTPException(status_code=400, detail="Invalid clientId")
+
+    docInfo = await uploadDocument(fileBlob)
+
+    async with conn.transaction():
+        documentId = await conn.fetchval(
+            """
+            INSERT INTO document (
+              file_name, file_url, file_extension, file_size, project_id, client_id, purpose
+            ) VALUES ($1,$2,$3,$4,$5,$6,'quote') RETURNING id;
+            """,
+            docInfo["file_name"],
+            docInfo["file_url"],
+            docInfo["file_extension"],
+            docInfo["file_size"],
+            projectId,
+            clientId,
+        )
+
+        statusId = await conn.fetchval(
+            "SELECT id FROM status WHERE category='quote' AND value='Pending' AND is_deleted=FALSE LIMIT 1;"
+        )
+
+        quoteId = await conn.fetchval(
+            """
+            INSERT INTO quote (
+              amount, project_id, client_id, status_id, file_id
+            ) VALUES ($1,$2,$3,$4,$5) RETURNING id;
+            """,
+            amount,
+            projectId,
+            clientId,
+            statusId,
+            documentId,
+        )
+
+    return {"quoteId": quoteId}
+
+
 
 ################################################################################
 # TODO:                         PROFILE ENDPOINTS                              #
@@ -1184,6 +1461,84 @@ async def getBillingStatuses(conn: Connection = Depends(get_conn)):
 ################################################################################
 # TODO:                         ONBOARDING ENDPOINTS                           #
 ################################################################################
+
+@app.get("/get-onboarding-data")
+async def getOnboardingData(
+        clientId: str = Query(..., description="Client UUID"),
+        conn: Connection = Depends(get_conn)
+):
+    if not clientId or not isUUIDv4(clientId):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid UUIDv4 (must be lowercase-hyphenated): {clientId}"
+        )
+
+    generalSql = """
+        SELECT satellite_office_address, organization_type, establishment_year,
+               annual_revenue, accepted_payment_methods, naics_code, duns_number
+          FROM client_onboarding_general
+         WHERE client_id = $1 AND is_deleted = FALSE
+         LIMIT 1;
+    """
+    serviceSql = """
+        SELECT coverage_area, admin_staff_count, field_staff_count, licenses,
+               working_hours, covers_after_hours, covers_weekend_calls
+          FROM client_onboarding_service
+         WHERE client_id = $1 AND is_deleted = FALSE
+         LIMIT 1;
+    """
+    contactSql = """
+        SELECT dispatch_supervisor, field_supervisor, management_supervisor,
+               regular_hours_contact, emergency_hours_contact
+          FROM client_onboarding_contact
+         WHERE client_id = $1 AND is_deleted = FALSE
+         LIMIT 1;
+    """
+    loadSql = """
+        SELECT avg_monthly_tickets_last4, po_source_split, monthly_po_capacity
+          FROM client_onboarding_load
+         WHERE client_id = $1 AND is_deleted = FALSE
+         LIMIT 1;
+    """
+    tradeSql = """
+        SELECT pt.value AS trade, tc.coverage_level
+          FROM client_trade_coverage tc
+          JOIN project_trade pt ON pt.id = tc.project_trade_id
+         WHERE tc.client_id = $1
+           AND tc.is_deleted = FALSE
+           AND pt.is_deleted = FALSE;
+    """
+    pricingSql = """
+        SELECT item_label, regular_hours_rate, after_hours_rate, is_custom
+          FROM client_pricing_structure
+         WHERE client_id = $1 AND is_deleted = FALSE;
+    """
+    refsSql = """
+        SELECT company_name, contact_name, contact_email, contact_phone
+          FROM client_references
+         WHERE client_id = $1 AND is_deleted = FALSE;
+    """
+
+    try:
+        generalRow = await conn.fetchrow(generalSql, clientId)
+        serviceRow = await conn.fetchrow(serviceSql, clientId)
+        contactRow = await conn.fetchrow(contactSql, clientId)
+        loadRow = await conn.fetchrow(loadSql, clientId)
+        tradeRows = await conn.fetch(tradeSql, clientId)
+        pricingRows = await conn.fetch(pricingSql, clientId)
+        refsRows = await conn.fetch(refsSql, clientId)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "general": dict(generalRow) if generalRow else {},
+        "service": dict(serviceRow) if serviceRow else {},
+        "contact": dict(contactRow) if contactRow else {},
+        "load": dict(loadRow) if loadRow else {},
+        "tradeCoverage": [dict(r) for r in tradeRows],
+        "pricing": [dict(r) for r in pricingRows],
+        "references": [dict(r) for r in refsRows],
+    }
 
 @app.post("/save-onboarding-data")
 async def saveOnboardingData(
