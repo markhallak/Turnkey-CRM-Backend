@@ -313,7 +313,7 @@ PASSWORD = """
 CREATE TABLE IF NOT EXISTS password (
   user_id               UUID        PRIMARY KEY
     REFERENCES "user"(id) ON DELETE CASCADE,
-  encrypted_private_key BYTEA       NOT NULL,
+  encrypted_password    BYTEA       NOT NULL,
   iv                    BYTEA       NOT NULL,
   salt                  BYTEA       NOT NULL,
   kdf_params            JSONB       NOT NULL,
