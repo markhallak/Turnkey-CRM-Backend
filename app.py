@@ -74,28 +74,28 @@ async def globalSearch(
 @app.get("/get-notifications")
 async def getNotifications(
         size: int = Query(..., gt=0, description="Number of notifications per page"),
-        last_seen_created_at: Optional[str] = Query(
+        lastSeenCreatedAt: Optional[str] = Query(
             None,
             description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
         ),
-        last_seen_id: Optional[UUID] = Query(
+        lastSeenId: Optional[UUID] = Query(
             None,
             description="UUID cursor to break ties if multiple notifications share the same timestamp"
         ),
         conn: Connection = Depends(get_conn)
 ):
     # parse or default to now
-    if last_seen_created_at:
+    if lastSeenCreatedAt:
         try:
-            dt = datetime.fromisoformat(last_seen_created_at)
-            cursor_ts = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            dt = datetime.fromisoformat(lastSeenCreatedAt)
+            cursorTs = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
-            raise HTTPException(400, detail=f"Invalid timestamp: '{last_seen_created_at}'")
+            raise HTTPException(400, detail=f"Invalid timestamp: '{lastSeenCreatedAt}'")
     else:
-        cursor_ts = datetime.now(timezone.utc)
+        cursorTs = datetime.now(timezone.utc)
 
-    max_uuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
-    cursor_id = last_seen_id or max_uuid
+    maxUuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    cursorId = lastSeenId or maxUuid
 
     sql = """
     SELECT
@@ -108,7 +108,7 @@ async def getNotifications(
     """
 
     try:
-        rows = await conn.fetch(sql, cursor_ts, cursor_id, size)
+        rows = await conn.fetch(sql, cursorTs, cursorId, size)
     except Exception as e:
         raise HTTPException(500, detail=str(e))
 
@@ -116,18 +116,18 @@ async def getNotifications(
 
     if rows:
         last = rows[-1]
-        next_ts = last["created_at"].isoformat()
-        next_id = str(last["id"])
+        nextTs = last["created_at"].isoformat()
+        nextId = str(last["id"])
     else:
-        next_ts = None
-        next_id = None
+        nextTs = None
+        nextId = None
 
     return {
         "notifications": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
-        "last_seen_created_at": next_ts,
-        "last_seen_id": next_id,
+        "lastSeenCreatedAt": nextTs,
+        "lastSeenId": nextId,
     }
 
 
@@ -219,32 +219,32 @@ async def getCalendarEvents(
 @app.get("/get-projects")
 async def getProjects(
         size: int = Query(..., gt=0, description="Number of projects per page"),
-        last_seen_created_at: Optional[str] = Query(
+        lastSeenCreatedAt: Optional[str] = Query(
             None,
             description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
         ),
-        last_seen_id: Optional[UUID] = Query(
+        lastSeenId: Optional[UUID] = Query(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
         conn: Connection = Depends(get_conn)
 ):
     # 1) parse the timestamp (or default to now)
-    if last_seen_created_at:
+    if lastSeenCreatedAt:
         try:
-            dt = datetime.fromisoformat(last_seen_created_at)
-            cursor_ts = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            dt = datetime.fromisoformat(lastSeenCreatedAt)
+            cursorTs = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid timestamp: '{last_seen_created_at}'"
+                detail=f"Invalid timestamp: '{lastSeenCreatedAt}'"
             )
     else:
-        cursor_ts = datetime.now(timezone.utc)
+        cursorTs = datetime.now(timezone.utc)
 
     # 2) default the ID cursor to the MAX‐UUID when not provided
-    max_uuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
-    cursor_id = last_seen_id or max_uuid
+    maxUuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    cursorId = lastSeenId or maxUuid
 
     # 3) tuple‐comparison + tie‐break by id
     sql = """
@@ -264,7 +264,7 @@ async def getProjects(
     """
 
     try:
-        rows = await conn.fetch(sql, cursor_ts, cursor_id, size)
+        rows = await conn.fetch(sql, cursorTs, cursorId, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -273,18 +273,18 @@ async def getProjects(
     # Build the next‐page cursors from the last row
     if rows:
         last = rows[-1]
-        next_ts = last["created_at"].isoformat()
-        next_id = str(last["id"])
+        nextTs = last["created_at"].isoformat()
+        nextId = str(last["id"])
     else:
-        next_ts = None
-        next_id = None
+        nextTs = None
+        nextId = None
 
     return {
         "projects": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
-        "last_seen_created_at": next_ts,
-        "last_seen_id": next_id,
+        "lastSeenCreatedAt": nextTs,
+        "lastSeenId": nextId,
     }
 
 
@@ -551,30 +551,30 @@ async def fetchProject(
 async def getMessages(
         projectId: str = Query(..., description="Project UUID"),
         size: int = Query(..., gt=0, description="Number of messages to return"),
-        last_seen_created_at: Optional[str] = Query(
+        lastSeenCreatedAt: Optional[str] = Query(
             None,
             description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
         ),
-        last_seen_id: Optional[UUID] = Query(
+        lastSeenId: Optional[UUID] = Query(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
         conn: Connection = Depends(get_conn)
 ):
-    if last_seen_created_at:
+    if lastSeenCreatedAt:
         try:
-            dt = datetime.fromisoformat(last_seen_created_at)
-            cursor_ts = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            dt = datetime.fromisoformat(lastSeenCreatedAt)
+            cursorTs = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid timestamp: '{last_seen_created_at}'"
+                detail=f"Invalid timestamp: '{lastSeenCreatedAt}'"
             )
     else:
-        cursor_ts = datetime.now(timezone.utc)
+        cursorTs = datetime.now(timezone.utc)
 
-    max_uuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
-    cursor_id = last_seen_id or max_uuid
+    maxUuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    cursorId = lastSeenId or maxUuid
 
     sql = """
             SELECT
@@ -607,7 +607,7 @@ async def getMessages(
         """
 
     try:
-        rows = await conn.fetch(sql, projectId, cursor_ts, cursor_id, size)
+        rows = await conn.fetch(sql, projectId, cursorTs, cursorId, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -615,49 +615,97 @@ async def getMessages(
 
     if rows:
         last = rows[-1]
-        next_ts = last["created_at"].isoformat()
-        next_id = str(last["id"])
+        nextTs = last["created_at"].isoformat()
+        nextId = str(last["id"])
     else:
-        next_ts = None
-        next_id = None
+        nextTs = None
+        nextId = None
 
     return {
         "messages": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
-        "last_seen_created_at": next_ts,
-        "last_seen_id": next_id,
+        "lastSeenCreatedAt": nextTs,
+        "lastSeenId": nextId,
     }
+
+
+@app.post("/send-message")
+async def sendMessage(
+        payload: dict = Body(...),
+        conn: Connection = Depends(get_conn)
+):
+    projectId = payload.get("projectId")
+    senderId = payload.get("senderId")
+    text = payload.get("text", "")
+    fileBlob = payload.get("fileBlob", b"")
+
+    if not projectId or not isUUIDv4(projectId):
+        raise HTTPException(status_code=400, detail="Invalid projectId")
+    if not senderId or not isUUIDv4(senderId):
+        raise HTTPException(status_code=400, detail="Invalid senderId")
+
+    documentId = None
+    if fileBlob:
+        docInfo = await uploadDocument(fileBlob)
+        documentId = await conn.fetchval(
+            """
+            INSERT INTO document (
+              file_name, file_url, file_extension, file_size, document_type,
+              project_id, purpose
+            ) VALUES ($1,$2,$3,$4,$5,$6,'message') RETURNING id;
+            """,
+            docInfo["file_name"],
+            docInfo["file_url"],
+            docInfo["file_extension"],
+            docInfo["file_size"],
+            docInfo["file_extension"],
+            projectId,
+        )
+
+    messageId = await conn.fetchval(
+        """
+        INSERT INTO message (
+          content, sender_id, project_id, file_attachment_id
+        ) VALUES ($1,$2,$3,$4) RETURNING id;
+        """,
+        text,
+        senderId,
+        projectId,
+        documentId,
+    )
+
+    return {"messageId": messageId}
 
 
 @app.get("/fetch-project-quotes")
 async def fetchProjectQuotesEndpoint(
         project_id: str = Query(..., description="Project UUID"),
         size: int = Query(..., gt=0, description="Number of quotes to return"),
-        last_seen_created_at: Optional[str] = Query(
+        lastSeenCreatedAt: Optional[str] = Query(
             None,
             description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
         ),
-        last_seen_id: Optional[UUID] = Query(
+        lastSeenId: Optional[UUID] = Query(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
         conn: Connection = Depends(get_conn)
 ):
-    if last_seen_created_at:
+    if lastSeenCreatedAt:
         try:
-            dt = datetime.fromisoformat(last_seen_created_at)
-            cursor_ts = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            dt = datetime.fromisoformat(lastSeenCreatedAt)
+            cursorTs = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid timestamp: '{last_seen_created_at}'"
+                detail=f"Invalid timestamp: '{lastSeenCreatedAt}'"
             )
     else:
-        cursor_ts = datetime.now(timezone.utc)
+        cursorTs = datetime.now(timezone.utc)
 
-    max_uuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
-    cursor_id = last_seen_id or max_uuid
+    maxUuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    cursorId = lastSeenId or maxUuid
 
     sql = """
         SELECT
@@ -681,7 +729,7 @@ async def fetchProjectQuotesEndpoint(
         """
 
     try:
-        rows = await conn.fetch(sql, project_id, cursor_ts, cursor_id, size)
+        rows = await conn.fetch(sql, project_id, cursorTs, cursorId, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     total = rows[0]["total_count"] if rows else 0
@@ -689,11 +737,11 @@ async def fetchProjectQuotesEndpoint(
 
     if rows:
         last = rows[-1]
-        next_ts = last["created_at"].isoformat()
-        next_id = str(last["id"])
+        nextTs = last["created_at"].isoformat()
+        nextId = str(last["id"])
     else:
-        next_ts = None
-        next_id = None
+        nextTs = None
+        nextId = None
 
     return {
         "quotes": [
@@ -708,8 +756,8 @@ async def fetchProjectQuotesEndpoint(
         ],
         "total_count": total,
         "page_size": size,
-        "last_seen_created_at": next_ts,
-        "last_seen_id": next_id,
+        "lastSeenCreatedAt": nextTs,
+        "lastSeenId": nextId,
     }
 
 
@@ -717,30 +765,30 @@ async def fetchProjectQuotesEndpoint(
 async def fetchProjectDocumentsEndpoint(
         project_id: str = Query(..., description="Project UUID"),
         size: int = Query(..., gt=0, description="Number of documents to return"),
-        last_seen_created_at: Optional[str] = Query(
+        lastSeenCreatedAt: Optional[str] = Query(
             None,
             description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
         ),
-        last_seen_id: Optional[UUID] = Query(
+        lastSeenId: Optional[UUID] = Query(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
         conn: Connection = Depends(get_conn)
 ):
-    if last_seen_created_at:
+    if lastSeenCreatedAt:
         try:
-            dt = datetime.fromisoformat(last_seen_created_at)
-            cursor_ts = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            dt = datetime.fromisoformat(lastSeenCreatedAt)
+            cursorTs = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid timestamp: '{last_seen_created_at}'"
+                detail=f"Invalid timestamp: '{lastSeenCreatedAt}'"
             )
     else:
-        cursor_ts = datetime.now(timezone.utc)
+        cursorTs = datetime.now(timezone.utc)
 
-    max_uuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
-    cursor_id = last_seen_id or max_uuid
+    maxUuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    cursorId = lastSeenId or maxUuid
 
     sql = """
         SELECT
@@ -760,18 +808,18 @@ async def fetchProjectDocumentsEndpoint(
         """
 
     try:
-        rows = await conn.fetch(sql, project_id, cursor_ts, cursor_id, size)
+        rows = await conn.fetch(sql, project_id, cursorTs, cursorId, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     total = rows[0]["total_count"] if rows else 0
 
     if rows:
         last = rows[-1]
-        next_ts = last["created_at"].isoformat()
-        next_id = str(last["id"])
+        nextTs = last["created_at"].isoformat()
+        nextId = str(last["id"])
     else:
-        next_ts = None
-        next_id = None
+        nextTs = None
+        nextId = None
 
     return {
         "documents": [
@@ -786,8 +834,8 @@ async def fetchProjectDocumentsEndpoint(
         ],
         "total_count": total,
         "page_size": size,
-        "last_seen_created_at": next_ts,
-        "last_seen_id": next_id,
+        "lastSeenCreatedAt": nextTs,
+        "lastSeenId": nextId,
     }
 
 
@@ -798,30 +846,30 @@ async def fetchProjectDocumentsEndpoint(
 @app.get("/get-clients")
 async def getClients(
         size: int = Query(..., gt=0, description="Number of clients per page"),
-        last_seen_created_at: Optional[str] = Query(
+        lastSeenCreatedAt: Optional[str] = Query(
             None,
             description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
         ),
-        last_seen_id: Optional[UUID] = Query(
+        lastSeenId: Optional[UUID] = Query(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
         conn: Connection = Depends(get_conn)
 ):
-    if last_seen_created_at:
+    if lastSeenCreatedAt:
         try:
-            dt = datetime.fromisoformat(last_seen_created_at)
-            cursor_ts = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            dt = datetime.fromisoformat(lastSeenCreatedAt)
+            cursorTs = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid timestamp: '{last_seen_created_at}'"
+                detail=f"Invalid timestamp: '{lastSeenCreatedAt}'"
             )
     else:
-        cursor_ts = datetime.now(timezone.utc)
+        cursorTs = datetime.now(timezone.utc)
 
-    max_uuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
-    cursor_id = last_seen_id or max_uuid
+    maxUuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    cursorId = lastSeenId or maxUuid
 
     sql = """
             SELECT
@@ -849,7 +897,7 @@ async def getClients(
         """
 
     try:
-        rows = await conn.fetch(sql, cursor_ts, cursor_id, size)
+        rows = await conn.fetch(sql, cursorTs, cursorId, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -857,18 +905,18 @@ async def getClients(
 
     if rows:
         last = rows[-1]
-        next_ts = last["created_at"].isoformat()
-        next_id = str(last["id"])
+        nextTs = last["created_at"].isoformat()
+        nextId = str(last["id"])
     else:
-        next_ts = None
-        next_id = None
+        nextTs = None
+        nextId = None
 
     return {
         "clients": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
-        "last_seen_created_at": next_ts,
-        "last_seen_id": next_id,
+        "lastSeenCreatedAt": nextTs,
+        "lastSeenId": nextId,
     }
 
 
@@ -1032,30 +1080,30 @@ async def fetchClient(
 async def fetchClientInvoices(
         client_id: str = Query(..., description="Client UUID"),
         size: int = Query(..., gt=0, description="Number of invoices to return"),
-        last_seen_created_at: Optional[str] = Query(
+        lastSeenCreatedAt: Optional[str] = Query(
             None,
             description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
         ),
-        last_seen_id: Optional[UUID] = Query(
+        lastSeenId: Optional[UUID] = Query(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
         conn: Connection = Depends(get_conn)
 ):
-    if last_seen_created_at:
+    if lastSeenCreatedAt:
         try:
-            dt = datetime.fromisoformat(last_seen_created_at)
-            cursor_ts = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            dt = datetime.fromisoformat(lastSeenCreatedAt)
+            cursorTs = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid timestamp: '{last_seen_created_at}'"
+                detail=f"Invalid timestamp: '{lastSeenCreatedAt}'"
             )
     else:
-        cursor_ts = datetime.now(timezone.utc)
+        cursorTs = datetime.now(timezone.utc)
 
-    max_uuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
-    cursor_id = last_seen_id or max_uuid
+    maxUuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    cursorId = lastSeenId or maxUuid
 
     sql = """
         SELECT
@@ -1077,7 +1125,7 @@ async def fetchClientInvoices(
     """
 
     try:
-        rows = await conn.fetch(sql, client_id, cursor_ts, cursor_id, size)
+        rows = await conn.fetch(sql, client_id, cursorTs, cursorId, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1085,18 +1133,18 @@ async def fetchClientInvoices(
 
     if rows:
         last = rows[-1]
-        next_ts = last["created_at"].isoformat()
-        next_id = str(last["id"])
+        nextTs = last["created_at"].isoformat()
+        nextId = str(last["id"])
     else:
-        next_ts = None
-        next_id = None
+        nextTs = None
+        nextId = None
 
     return {
         "invoices": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
-        "last_seen_created_at": next_ts,
-        "last_seen_id": next_id,
+        "lastSeenCreatedAt": nextTs,
+        "lastSeenId": nextId,
     }
 
 
@@ -1104,30 +1152,30 @@ async def fetchClientInvoices(
 async def fetchClientOnboardingDocuments(
         client_id: str = Query(..., description="Client UUID"),
         size: int = Query(..., gt=0, description="Number of documents to return"),
-        last_seen_created_at: Optional[str] = Query(
+        lastSeenCreatedAt: Optional[str] = Query(
             None,
             description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
         ),
-        last_seen_id: Optional[UUID] = Query(
+        lastSeenId: Optional[UUID] = Query(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
         conn: Connection = Depends(get_conn)
 ):
-    if last_seen_created_at:
+    if lastSeenCreatedAt:
         try:
-            dt = datetime.fromisoformat(last_seen_created_at)
-            cursor_ts = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            dt = datetime.fromisoformat(lastSeenCreatedAt)
+            cursorTs = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid timestamp: '{last_seen_created_at}'"
+                detail=f"Invalid timestamp: '{lastSeenCreatedAt}'"
             )
     else:
-        cursor_ts = datetime.now(timezone.utc)
+        cursorTs = datetime.now(timezone.utc)
 
-    max_uuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
-    cursor_id = last_seen_id or max_uuid
+    maxUuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    cursorId = lastSeenId or maxUuid
 
     sql = """
         SELECT
@@ -1148,7 +1196,7 @@ async def fetchClientOnboardingDocuments(
     """
 
     try:
-        rows = await conn.fetch(sql, client_id, cursor_ts, cursor_id, size)
+        rows = await conn.fetch(sql, client_id, cursorTs, cursorId, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1156,11 +1204,11 @@ async def fetchClientOnboardingDocuments(
 
     if rows:
         last = rows[-1]
-        next_ts = last["created_at"].isoformat()
-        next_id = str(last["id"])
+        nextTs = last["created_at"].isoformat()
+        nextId = str(last["id"])
     else:
-        next_ts = None
-        next_id = None
+        nextTs = None
+        nextId = None
 
     return {
         "documents": [
@@ -1175,8 +1223,8 @@ async def fetchClientOnboardingDocuments(
         ],
         "total_count": total,
         "page_size": size,
-        "last_seen_created_at": next_ts,
-        "last_seen_id": next_id,
+        "lastSeenCreatedAt": nextTs,
+        "lastSeenId": nextId,
     }
 
 
@@ -1184,30 +1232,30 @@ async def fetchClientOnboardingDocuments(
 async def getInsuranceDocuments(
         client_id: str = Query(..., description="Client UUID"),
         size: int = Query(..., gt=0, description="Number of documents to return"),
-        last_seen_created_at: Optional[str] = Query(
+        lastSeenCreatedAt: Optional[str] = Query(
             None,
             description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
         ),
-        last_seen_id: Optional[UUID] = Query(
+        lastSeenId: Optional[UUID] = Query(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
         conn: Connection = Depends(get_conn)
 ):
-    if last_seen_created_at:
+    if lastSeenCreatedAt:
         try:
-            dt = datetime.fromisoformat(last_seen_created_at)
-            cursor_ts = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            dt = datetime.fromisoformat(lastSeenCreatedAt)
+            cursorTs = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid timestamp: '{last_seen_created_at}'"
+                detail=f"Invalid timestamp: '{lastSeenCreatedAt}'"
             )
     else:
-        cursor_ts = datetime.now(timezone.utc)
+        cursorTs = datetime.now(timezone.utc)
 
-    max_uuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
-    cursor_id = last_seen_id or max_uuid
+    maxUuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    cursorId = lastSeenId or maxUuid
 
     sql = """
         SELECT
@@ -1227,17 +1275,17 @@ async def getInsuranceDocuments(
         LIMIT $4;
     """
 
-    rows = await conn.fetch(sql, client_id, cursor_ts, cursor_id, size)
+    rows = await conn.fetch(sql, client_id, cursorTs, cursorId, size)
 
     total = rows[0]["total_count"] if rows else 0
 
     if rows:
         last = rows[-1]
-        next_ts = last["created_at"].isoformat()
-        next_id = str(last["id"])
+        nextTs = last["created_at"].isoformat()
+        nextId = str(last["id"])
     else:
-        next_ts = None
-        next_id = None
+        nextTs = None
+        nextId = None
 
     return {
         "documents": [
@@ -1252,8 +1300,8 @@ async def getInsuranceDocuments(
         ],
         "total_count": total,
         "page_size": size,
-        "last_seen_created_at": next_ts,
-        "last_seen_id": next_id,
+        "lastSeenCreatedAt": nextTs,
+        "lastSeenId": nextId,
     }
 
 
@@ -1261,30 +1309,30 @@ async def getInsuranceDocuments(
 async def fetchClientProjects(
         client_id: str = Query(..., description="Client UUID"),
         size: int = Query(..., gt=0, description="Number of projects to return"),
-        last_seen_created_at: Optional[str] = Query(
+        lastSeenCreatedAt: Optional[str] = Query(
             None,
             description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
         ),
-        last_seen_id: Optional[UUID] = Query(
+        lastSeenId: Optional[UUID] = Query(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
         conn: Connection = Depends(get_conn)
 ):
-    if last_seen_created_at:
+    if lastSeenCreatedAt:
         try:
-            dt = datetime.fromisoformat(last_seen_created_at)
-            cursor_ts = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            dt = datetime.fromisoformat(lastSeenCreatedAt)
+            cursorTs = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid timestamp: '{last_seen_created_at}'"
+                detail=f"Invalid timestamp: '{lastSeenCreatedAt}'"
             )
     else:
-        cursor_ts = datetime.now(timezone.utc)
+        cursorTs = datetime.now(timezone.utc)
 
-    max_uuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
-    cursor_id = last_seen_id or max_uuid
+    maxUuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    cursorId = lastSeenId or maxUuid
 
     sql = """
         SELECT
@@ -1306,25 +1354,25 @@ async def fetchClientProjects(
     """
 
     try:
-        rows = await conn.fetch(sql, client_id, cursor_ts, cursor_id, size)
+        rows = await conn.fetch(sql, client_id, cursorTs, cursorId, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
     total = rows[0]["total_count"] if rows else 0
     if rows:
         last = rows[-1]
-        next_ts = last["created_at"].isoformat()
-        next_id = str(last["id"])
+        nextTs = last["created_at"].isoformat()
+        nextId = str(last["id"])
     else:
-        next_ts = None
-        next_id = None
+        nextTs = None
+        nextId = None
 
     return {
         "projects": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
-        "last_seen_created_at": next_ts,
-        "last_seen_id": next_id,
+        "lastSeenCreatedAt": nextTs,
+        "lastSeenId": nextId,
     }
 
 
@@ -1408,8 +1456,8 @@ async def getBillings(
         "billings": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
-        "last_seen_created_at": nextTs,
-        "last_seen_id": nextId,
+        "lastSeenCreatedAt": nextTs,
+        "lastSeenId": nextId,
     }
 
 
@@ -1438,7 +1486,7 @@ async def getPasswords(
             None,
             description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
         ),
-        lastSeenUserId: Optional[UUID] = Query(
+        lastSeenId: Optional[UUID] = Query(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
@@ -1457,7 +1505,7 @@ async def getPasswords(
         cursorTs = datetime.now(timezone.utc)
 
     maxUuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
-    cursorId = lastSeenUserId or maxUuid
+    cursorId = lastSeenId or maxUuid
 
     sql = """
         SELECT
@@ -1490,8 +1538,8 @@ async def getPasswords(
         "passwords": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
-        "last_seen_created_at": nextTs,
-        "last_seen_user_id": nextId,
+        "lastSeenCreatedAt": nextTs,
+        "lastSeenId": nextId,
     }
 
 
