@@ -35,7 +35,6 @@ async def get_conn(db_pool: Pool = Depends(get_db_pool)):
         yield conn
 
 
-
 ################################################################################
 # TODO:                           HEADER ENDPOINTS                             #
 ################################################################################
@@ -45,7 +44,6 @@ async def globalSearch(
         q: str = Query(..., description="Search query string"),
         conn: Connection = Depends(get_conn)
 ):
-
     globalSearchSql = """
         SELECT source_table, record_id, search_text, is_deleted
           FROM global_search
@@ -65,16 +63,16 @@ async def globalSearch(
 
 @app.get("/get-notifications")
 async def getNotifications(
-    size: int = Query(..., gt=0, description="Number of notifications per page"),
-    last_seen_created_at: Optional[str] = Query(
-        None,
-        description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
-    ),
-    last_seen_id: Optional[UUID] = Query(
-        None,
-        description="UUID cursor to break ties if multiple notifications share the same timestamp"
-    ),
-    conn: Connection = Depends(get_conn)
+        size: int = Query(..., gt=0, description="Number of notifications per page"),
+        last_seen_created_at: Optional[str] = Query(
+            None,
+            description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
+        ),
+        last_seen_id: Optional[UUID] = Query(
+            None,
+            description="UUID cursor to break ties if multiple notifications share the same timestamp"
+        ),
+        conn: Connection = Depends(get_conn)
 ):
     # parse or default to now
     if last_seen_created_at:
@@ -106,7 +104,6 @@ async def getNotifications(
 
     total = rows[0]["total_count"] if rows else 0
 
-
     if rows:
         last = rows[-1]
         next_ts = last["created_at"].isoformat()
@@ -127,10 +124,10 @@ async def getNotifications(
 # TODO: Still needs work, check the user_type, and the client_id if we need to return those
 @app.get("/get-profile-details")
 async def getProfileDetails(
-            user_id: UUID = Query(..., description="UUID of the user whose profile to fetch"),
-            conn: Connection = Depends(get_conn)
-    ):
-        sql = """
+        user_id: UUID = Query(..., description="UUID of the user whose profile to fetch"),
+        conn: Connection = Depends(get_conn)
+):
+    sql = """
             SELECT first_name, hex_color
             FROM "user"
             WHERE id = $1
@@ -138,14 +135,14 @@ async def getProfileDetails(
             LIMIT 1;
         """
 
-        row = await conn.fetchrow(sql, user_id)
-        if not row:
-            raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+    row = await conn.fetchrow(sql, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
-        return {
-            "first_name": row["first_name"],
-            "hex_color": row["hex_color"],
-        }
+    return {
+        "first_name": row["first_name"],
+        "hex_color": row["hex_color"],
+    }
 
 
 ################################################################################
@@ -165,15 +162,14 @@ async def getDashboardMetrics(conn: Connection = Depends(get_conn)):
 
 @app.get("/get-calendar-events")
 async def getCalendarEvents(
-    month: int = Query(
-        ...,
-        ge=1,
-        le=12,
-        description="Month index (1–12) to fetch calendar events for"
-    ),
-    conn: Connection = Depends(get_conn)
+        month: int = Query(
+            ...,
+            ge=1,
+            le=12,
+            description="Month index (1–12) to fetch calendar events for"
+        ),
+        conn: Connection = Depends(get_conn)
 ):
-
     sql = """
         SELECT
           p.*,
@@ -204,6 +200,7 @@ async def getCalendarEvents(
 
     return {"events": events}
 
+
 ################################################################################
 # TODO:                         PROJECTS PAGE ENDPOINTS                        #
 ################################################################################
@@ -211,18 +208,17 @@ async def getCalendarEvents(
 
 @app.get("/get-projects")
 async def getProjects(
-    size: int = Query(..., gt=0, description="Number of projects per page"),
-    last_seen_created_at: Optional[str] = Query(
-        None,
-        description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
-    ),
-    last_seen_id: Optional[UUID] = Query(
-        None,
-        description="UUID cursor to break ties if multiple rows share the same timestamp"
-    ),
-    conn: Connection = Depends(get_conn)
+        size: int = Query(..., gt=0, description="Number of projects per page"),
+        last_seen_created_at: Optional[str] = Query(
+            None,
+            description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
+        ),
+        last_seen_id: Optional[UUID] = Query(
+            None,
+            description="UUID cursor to break ties if multiple rows share the same timestamp"
+        ),
+        conn: Connection = Depends(get_conn)
 ):
-
     # 1) parse the timestamp (or default to now)
     if last_seen_created_at:
         try:
@@ -355,7 +351,6 @@ async def fetchProject(
         project_id: str = Query(..., description="Project UUID"),
         conn: Connection = Depends(get_conn)
 ):
-
     sql = """
         SELECT
           p.id,
@@ -477,7 +472,6 @@ async def getMessages(
         ),
         conn: Connection = Depends(get_conn)
 ):
-
     if last_seen_created_at:
         try:
             dt = datetime.fromisoformat(last_seen_created_at)
@@ -545,9 +539,6 @@ async def getMessages(
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
     }
-
-
-
 
 
 @app.get("/fetch-project-quotes")
@@ -714,16 +705,16 @@ async def fetchProjectDocumentsEndpoint(
 
 @app.get("/get-clients")
 async def getClients(
-    size: int = Query(..., gt=0, description="Number of clients per page"),
-    last_seen_created_at: Optional[str] = Query(
-        None,
-        description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
-    ),
-    last_seen_id: Optional[UUID] = Query(
-        None,
-        description="UUID cursor to break ties if multiple rows share the same timestamp"
-    ),
-    conn: Connection = Depends(get_conn)
+        size: int = Query(..., gt=0, description="Number of clients per page"),
+        last_seen_created_at: Optional[str] = Query(
+            None,
+            description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
+        ),
+        last_seen_id: Optional[UUID] = Query(
+            None,
+            description="UUID cursor to break ties if multiple rows share the same timestamp"
+        ),
+        conn: Connection = Depends(get_conn)
 ):
     if last_seen_created_at:
         try:
@@ -1080,11 +1071,9 @@ async def fetchClientProjects(
     }
 
 
-
 ################################################################################
 # TODO:                         BILLING ENDPOINTS                              #
 ################################################################################
-
 
 
 @app.get("/get-billings")
@@ -1182,6 +1171,7 @@ async def getBillingStatuses(conn: Connection = Depends(get_conn)):
         raise HTTPException(status_code=500, detail=str(e))
     return {"billing_statuses": [dict(r) for r in rows]}
 
+
 @app.post("/setup-recovery")
 async def setupRecovery(payload: dict = Body()):
     userId = payload['userId']
@@ -1198,6 +1188,7 @@ async def setupRecovery(payload: dict = Body()):
         "userId": userId,
         "purpose": purpose
     }
+
 
 if __name__ == "__main__":
     import uvicorn
