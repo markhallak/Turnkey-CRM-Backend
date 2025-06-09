@@ -595,8 +595,8 @@ async def fetchProjectQuotesEndpoint(
         rows = await conn.fetch(sql, project_id, cursor_ts, cursor_id, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
     total = rows[0]["total_count"] if rows else 0
+
 
     if rows:
         last = rows[-1]
@@ -673,6 +673,7 @@ async def fetchProjectDocumentsEndpoint(
         rows = await conn.fetch(sql, project_id, cursor_ts, cursor_id, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    total = rows[0]["total_count"] if rows else 0
 
     if rows:
         last = rows[-1]
@@ -1001,6 +1002,146 @@ async def fetchClientOnboardingDocuments(
     }
 
 
+@app.post("/save-onboarding-data")
+async def saveOnboardingData(
+        payload: dict = Body(...),
+        conn: Connection = Depends(get_conn)
+):
+    clientId = payload.get("clientId")
+
+    if not clientId or not isUUIDv4(clientId):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid UUIDv4 (must be lowercase-hyphenated): {clientId}"
+        )
+
+    general = payload.get("general", {})
+    service = payload.get("service", {})
+    contact = payload.get("contact", {})
+    loadInfo = payload.get("load", {})
+    tradeCoverage = payload.get("tradeCoverage", [])
+    pricing = payload.get("pricing", [])
+    references = payload.get("references", [])
+
+    async with conn.transaction():
+        await conn.execute(
+            """
+            INSERT INTO client_onboarding_general (
+              client_id, satellite_office_address, organization_type,
+              establishment_year, annual_revenue, accepted_payment_methods,
+              naics_code, duns_number
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8);
+            """,
+            clientId,
+            general.get("satelliteOfficeAddress"),
+            general.get("organizationType"),
+            general.get("establishmentYear"),
+            general.get("annualRevenue"),
+            general.get("paymentMethods"),
+            general.get("naicsCode"),
+            general.get("dunsNumber"),
+        )
+
+        await conn.execute(
+            """
+            INSERT INTO client_onboarding_service (
+              client_id, coverage_area, admin_staff_count, field_staff_count,
+              licenses, working_hours, covers_after_hours, covers_weekend_calls
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8);
+            """,
+            clientId,
+            service.get("coverageArea"),
+            service.get("adminStaffCount"),
+            service.get("fieldStaffCount"),
+            service.get("licenses"),
+            service.get("workingHours"),
+            bool(service.get("coversAfterHours")),
+            bool(service.get("coversWeekendCalls")),
+        )
+
+        await conn.execute(
+            """
+            INSERT INTO client_onboarding_contact (
+              client_id, dispatch_supervisor, field_supervisor, management_supervisor,
+              regular_hours_contact, emergency_hours_contact
+            ) VALUES ($1,$2,$3,$4,$5,$6);
+            """,
+            clientId,
+            contact.get("dispatchSupervisor"),
+            contact.get("fieldSupervisor"),
+            contact.get("managementSupervisor"),
+            contact.get("regularContact"),
+            contact.get("emergencyContact"),
+        )
+
+        await conn.execute(
+            """
+            INSERT INTO client_onboarding_load (
+              client_id, avg_monthly_tickets_last4, po_source_split, monthly_po_capacity
+            ) VALUES ($1,$2,$3,$4);
+            """,
+            clientId,
+            loadInfo.get("averageMonthlyTickets"),
+            loadInfo.get("poSourceSplit"),
+            loadInfo.get("monthlyPOCapacity"),
+        )
+
+        for tc in tradeCoverage:
+            tradeValue = tc.get("trade")
+            coverageLevel = tc.get("coverageLevel")
+            if not tradeValue or not coverageLevel:
+                continue
+            tradeId = await conn.fetchval(
+                "SELECT id FROM project_trade WHERE value=$1 AND is_deleted=FALSE LIMIT 1;",
+                tradeValue,
+            )
+            if tradeId:
+                await conn.execute(
+                    """
+                    INSERT INTO client_trade_coverage (
+                      client_id, project_trade_id, coverage_level
+                    ) VALUES ($1,$2,$3);
+                    """,
+                    clientId,
+                    tradeId,
+                    coverageLevel.upper(),
+                )
+
+        for price in pricing:
+            if not price.get("label"):
+                continue
+            await conn.execute(
+                """
+                INSERT INTO client_pricing_structure (
+                  client_id, item_label, regular_hours_rate, after_hours_rate, is_custom
+                ) VALUES ($1,$2,$3,$4,$5);
+                """,
+                clientId,
+                price.get("label"),
+                price.get("regular"),
+                price.get("after"),
+                bool(price.get("isCustom")),
+            )
+
+        for ref in references:
+            if not any(ref.values()):
+                continue
+            await conn.execute(
+                """
+                INSERT INTO client_references (
+                  client_id, company_name, contact_name, contact_email, contact_phone
+                ) VALUES ($1,$2,$3,$4,$5);
+                """,
+                clientId,
+                ref.get("company"),
+                ref.get("contact"),
+                ref.get("email"),
+                ref.get("phone"),
+            )
+
+    return {"status": "success"}
+
+
 @app.get("/fetch-client-projects")
 async def fetchClientProjects(
         client_id: str = Query(..., description="Client UUID"),
@@ -1054,6 +1195,7 @@ async def fetchClientProjects(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+    total = rows[0]["total_count"] if rows else 0
     if rows:
         last = rows[-1]
         next_ts = last["created_at"].isoformat()
