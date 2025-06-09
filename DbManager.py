@@ -204,6 +204,7 @@ CREATE TABLE IF NOT EXISTS document (
   file_url       TEXT         NOT NULL,
   file_extension VARCHAR(50)  NOT NULL,
   file_size      BIGINT       NOT NULL,
+  document_type  VARCHAR(255) NOT NULL,
   project_id     UUID         REFERENCES project(id)   ON UPDATE CASCADE ON DELETE RESTRICT,
   client_id      UUID         REFERENCES client(id)    ON UPDATE CASCADE ON DELETE RESTRICT,
   created_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
