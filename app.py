@@ -1398,6 +1398,9 @@ async def createNewInvoice(
 
     return {"invoiceId": invoiceId}
 
+################################################################################
+# TODO:                         QUOTE ENDPOINTS                              #
+################################################################################
 
 @app.post("/create-new-quote")
 async def createNewQuote(
@@ -1454,12 +1457,6 @@ async def createNewQuote(
 
 ################################################################################
 # TODO:                         PROFILE ENDPOINTS                              #
-################################################################################
-
-
-
-################################################################################
-# TODO:                         ONBOARDING ENDPOINTS                           #
 ################################################################################
 
 @app.get("/get-onboarding-data")
@@ -1539,6 +1536,12 @@ async def getOnboardingData(
         "pricing": [dict(r) for r in pricingRows],
         "references": [dict(r) for r in refsRows],
     }
+
+
+################################################################################
+# TODO:                         ONBOARDING ENDPOINTS                           #
+################################################################################
+
 
 @app.post("/save-onboarding-data")
 async def saveOnboardingData(
