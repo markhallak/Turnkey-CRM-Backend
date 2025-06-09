@@ -747,6 +747,7 @@ async def fetchProjectDocumentsEndpoint(
           d.id                  AS document_id,
           d.file_name           AS file_name,
           d.file_extension      AS type,
+          d.document_type       AS document_type,
           d.created_at          AS date_uploaded,
           COUNT(*) OVER()       AS total_count
         FROM document d
@@ -778,6 +779,7 @@ async def fetchProjectDocumentsEndpoint(
                 "document_id": r["document_id"],
                 "title": r["file_name"],
                 "type": r["type"],
+                "document_type": r["document_type"],
                 "date_uploaded": r["date_uploaded"]
             }
             for r in rows
@@ -1132,6 +1134,7 @@ async def fetchClientOnboardingDocuments(
           d.id             AS document_id,
           d.file_name      AS file_name,
           d.file_extension AS type,
+          d.document_type  AS document_type,
           d.created_at     AS date_uploaded,
           COUNT(*) OVER()  AS total_count
         FROM document d
@@ -1165,6 +1168,84 @@ async def fetchClientOnboardingDocuments(
                 "document_id": r["document_id"],
                 "title": r["file_name"],
                 "type": r["type"],
+                "document_type": r["document_type"],
+                "date_uploaded": r["date_uploaded"]
+            }
+            for r in rows
+        ],
+        "total_count": total,
+        "page_size": size,
+        "last_seen_created_at": next_ts,
+        "last_seen_id": next_id,
+    }
+
+
+@app.get("/get-insurance-documents")
+async def getInsuranceDocuments(
+        client_id: str = Query(..., description="Client UUID"),
+        size: int = Query(..., gt=0, description="Number of documents to return"),
+        last_seen_created_at: Optional[str] = Query(
+            None,
+            description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
+        ),
+        last_seen_id: Optional[UUID] = Query(
+            None,
+            description="UUID cursor to break ties if multiple rows share the same timestamp"
+        ),
+        conn: Connection = Depends(get_conn)
+):
+    if last_seen_created_at:
+        try:
+            dt = datetime.fromisoformat(last_seen_created_at)
+            cursor_ts = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid timestamp: '{last_seen_created_at}'"
+            )
+    else:
+        cursor_ts = datetime.now(timezone.utc)
+
+    max_uuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    cursor_id = last_seen_id or max_uuid
+
+    sql = """
+        SELECT
+          d.id             AS document_id,
+          d.file_name      AS file_name,
+          d.file_extension AS type,
+          d.document_type  AS document_type,
+          d.created_at     AS date_uploaded,
+          COUNT(*) OVER()  AS total_count
+        FROM document d
+        WHERE
+          d.client_id = $1
+          AND d.purpose = 'insurance'
+          AND d.is_deleted = FALSE
+          AND (d.created_at, d.id) < ($2::timestamptz, $3::uuid)
+        ORDER BY d.created_at DESC, d.id DESC
+        LIMIT $4;
+    """
+
+    rows = await conn.fetch(sql, client_id, cursor_ts, cursor_id, size)
+
+    total = rows[0]["total_count"] if rows else 0
+
+    if rows:
+        last = rows[-1]
+        next_ts = last["created_at"].isoformat()
+        next_id = str(last["id"])
+    else:
+        next_ts = None
+        next_id = None
+
+    return {
+        "documents": [
+            {
+                "document_id": r["document_id"],
+                "title": r["file_name"],
+                "type": r["type"],
+                "document_type": r["document_type"],
                 "date_uploaded": r["date_uploaded"]
             }
             for r in rows
@@ -1291,6 +1372,7 @@ async def getBillings(
           d.file_url,
           d.file_name,
           d.file_extension,
+          d.document_type,
           i.created_at,
           COUNT(*) OVER() AS total_count
         FROM invoice i
@@ -1348,6 +1430,71 @@ async def getBillingStatuses(conn: Connection = Depends(get_conn)):
     return {"billing_statuses": [dict(r) for r in rows]}
 
 
+@app.get("/get-passwords")
+async def getPasswords(
+        clientId: str = Query(..., description="Client UUID"),
+        size: int = Query(..., gt=0, description="Number of passwords per page"),
+        lastSeenCreatedAt: Optional[str] = Query(
+            None,
+            description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
+        ),
+        lastSeenUserId: Optional[UUID] = Query(
+            None,
+            description="UUID cursor to break ties if multiple rows share the same timestamp"
+        ),
+        conn: Connection = Depends(get_conn)
+):
+    if lastSeenCreatedAt:
+        try:
+            dt = datetime.fromisoformat(lastSeenCreatedAt)
+            cursorTs = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid timestamp: '{lastSeenCreatedAt}'"
+            )
+    else:
+        cursorTs = datetime.now(timezone.utc)
+
+    maxUuid = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    cursorId = lastSeenUserId or maxUuid
+
+    sql = """
+        SELECT
+          p.user_id,
+          p.encrypted_password,
+          p.iv,
+          p.salt,
+          p.kdf_params,
+          p.created_at,
+          COUNT(*) OVER() AS total_count
+        FROM password p
+        WHERE p.client_id = $1
+          AND (p.created_at, p.user_id) < ($2::timestamptz, $3::uuid)
+        ORDER BY p.created_at DESC, p.user_id DESC
+        LIMIT $4;
+    """
+
+    rows = await conn.fetch(sql, clientId, cursorTs, cursorId, size)
+
+    total = rows[0]["total_count"] if rows else 0
+    if rows:
+        last = rows[-1]
+        nextTs = last["created_at"].isoformat()
+        nextId = str(last["user_id"])
+    else:
+        nextTs = None
+        nextId = None
+
+    return {
+        "passwords": [dict(r) for r in rows],
+        "total_count": total,
+        "page_size": size,
+        "last_seen_created_at": nextTs,
+        "last_seen_user_id": nextId,
+    }
+
+
 @app.post("/create-new-invoice")
 async def createNewInvoice(
         payload: dict = Body(...),
@@ -1368,13 +1515,14 @@ async def createNewInvoice(
         documentId = await conn.fetchval(
             """
             INSERT INTO document (
-              file_name, file_url, file_extension, file_size, client_id, purpose
-            ) VALUES ($1,$2,$3,$4,$5,'invoice') RETURNING id;
+              file_name, file_url, file_extension, file_size, document_type, client_id, purpose
+            ) VALUES ($1,$2,$3,$4,$5,$6,'invoice') RETURNING id;
             """,
             docInfo["file_name"],
             docInfo["file_url"],
             docInfo["file_extension"],
             docInfo["file_size"],
+            docInfo["file_extension"],
             clientId,
         )
 
@@ -1423,13 +1571,14 @@ async def createNewQuote(
         documentId = await conn.fetchval(
             """
             INSERT INTO document (
-              file_name, file_url, file_extension, file_size, project_id, client_id, purpose
-            ) VALUES ($1,$2,$3,$4,$5,$6,'quote') RETURNING id;
+              file_name, file_url, file_extension, file_size, document_type, project_id, client_id, purpose
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,'quote') RETURNING id;
             """,
             docInfo["file_name"],
             docInfo["file_url"],
             docInfo["file_extension"],
             docInfo["file_size"],
+            docInfo["file_extension"],
             projectId,
             clientId,
         )
@@ -1452,6 +1601,42 @@ async def createNewQuote(
         )
 
     return {"quoteId": quoteId}
+
+
+@app.get("/get-invoice")
+async def getInvoice(
+        id: str = Query(..., description="Invoice UUID"),
+        conn: Connection = Depends(get_conn)
+):
+    sql = """
+        SELECT i.*, d.file_url, d.document_type
+          FROM invoice i
+          LEFT JOIN document d ON d.id = i.file_id AND d.is_deleted = FALSE
+         WHERE i.id = $1 AND i.is_deleted = FALSE
+         LIMIT 1;
+    """
+    row = await conn.fetchrow(sql, id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Invoice {id} not found")
+    return {"invoice": dict(row)}
+
+
+@app.get("/get-quote")
+async def getQuote(
+        id: str = Query(..., description="Quote UUID"),
+        conn: Connection = Depends(get_conn)
+):
+    sql = """
+        SELECT q.*, d.file_url, d.document_type
+          FROM quote q
+          LEFT JOIN document d ON d.id = q.file_id AND d.is_deleted = FALSE
+         WHERE q.id = $1 AND q.is_deleted = FALSE
+         LIMIT 1;
+    """
+    row = await conn.fetchrow(sql, id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Quote {id} not found")
+    return {"quote": dict(row)}
 
 
 
@@ -1681,6 +1866,38 @@ async def saveOnboardingData(
             )
 
     return {"status": "success"}
+
+
+@app.post("/update-insurance-data")
+async def updateInsuranceData(
+        payload: dict = Body(...),
+        conn: Connection = Depends(get_conn)
+):
+    clientId = payload.get("clientId")
+    provider = payload.get("provider")
+    policyNumber = payload.get("policyNumber")
+    coverageAmount = payload.get("coverageAmount")
+    startDate = payload.get("startDate")
+    endDate = payload.get("endDate")
+
+    if not clientId or not isUUIDv4(clientId):
+        raise HTTPException(status_code=400, detail="Invalid clientId")
+
+    insuranceId = await conn.fetchval(
+        """
+        INSERT INTO insurance (
+          client_id, provider, policy_number, coverage_amount, start_date, end_date
+        ) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id;
+        """,
+        clientId,
+        provider,
+        policyNumber,
+        coverageAmount,
+        startDate,
+        endDate,
+    )
+
+    return {"insuranceId": insuranceId}
 
 @app.post("/setup-recovery")
 async def setupRecovery(payload: dict = Body()):
