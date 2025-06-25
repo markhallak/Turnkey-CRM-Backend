@@ -120,6 +120,9 @@ CREATE TABLE IF NOT EXISTS user (
   client_id  UUID         REFERENCES client(id)    ON UPDATE CASCADE ON DELETE RESTRICT,
   created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  setup_recovery_done BOOLEAN NOT NULL DEFAULT FALSE,
+  onboarding_done BOOLEAN NOT NULL DEFAULT FALSE,
+  is_active  BOOLEAN      NOT NULL DEFAULT FALSE,
   is_deleted BOOLEAN      NOT NULL DEFAULT FALSE,
   deleted_at TIMESTAMPTZ
 );
@@ -321,6 +324,17 @@ CREATE TABLE IF NOT EXISTS password (
   kdf_params            JSONB       NOT NULL,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+# 11: USER_KEY
+USER_KEY = """
+CREATE TABLE IF NOT EXISTS user_key (
+  user_id  UUID    NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  purpose  VARCHAR(16) NOT NULL,
+  public_key BYTEA NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, purpose)
 );
 """
 
@@ -843,6 +857,7 @@ async def create_tables():
             ("message_mention", MESSAGE_MENTION),
             ("magic_link", MAGIC_LINK),
             ("password", PASSWORD),
+            ("user_key", USER_KEY),
             ("insurance", INSURANCE),
             ("notification", NOTIFICATION),
             ("state", STATE),

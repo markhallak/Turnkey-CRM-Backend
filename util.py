@@ -6,7 +6,10 @@ from time import perf_counter
 from typing import Optional
 from uuid import UUID, uuid4
 
-from asyncpg import Record, Pool
+from asyncpg import Record, Pool, Connection
+import base64
+import json
+import hmac
 
 
 async def isUUIDv4(u: str) -> bool:
@@ -18,7 +21,7 @@ async def isUUIDv4(u: str) -> bool:
     return str(val) == u
 
 
-async def has_unexpired_magic_link(
+async def hasUnexpiredMagicLink(
     db_pool,
     user_id: UUID,
     purpose: str
@@ -42,13 +45,14 @@ async def has_unexpired_magic_link(
     return bool(row)
 
 
-async def create_magic_link(
-    db_pool,
+async def createMagicLink(
+    conn: Connection,
     user_id: UUID,
     server_secret: str,
     purpose: str = "setup-recovery",
-    redirect_path: str = "/setup-recovery"
-) -> bool:
+    redirect_path: str = "/setup-recovery",
+    ttlHours: int = 24
+) -> tuple[str, str]:
 
     # 1) Generate a new UUID v4
     new_uuid = uuid4()
@@ -61,8 +65,8 @@ async def create_magic_link(
         digestmod=sha256
     ).hexdigest()
 
-    # 3) Set an expiration time (24 hours from now)
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    # 3) Set an expiration time based on ttlHours
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=ttlHours)
 
     # 4) Insert into magic_links table
     sql = """
@@ -70,18 +74,48 @@ async def create_magic_link(
           uuid, user_id, sig, expires_at, consumed, purpose, redirect_path
         ) VALUES ($1, $2, $3, $4, FALSE, $5, $6);
     """
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            sql,
-            new_uuid,
-            user_id,
-            signature,
-            expires_at,
-            purpose,
-            redirect_path
-        )
+    await conn.execute(
+        sql,
+        new_uuid,
+        user_id,
+        signature,
+        expires_at,
+        purpose,
+        redirect_path,
+    )
 
-    return True
+    return str(new_uuid), signature
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("utf-8")
+
+
+def generateJwt(payload: dict, secret: str, expiresIn: int) -> str:
+    exp = int(datetime.now(timezone.utc).timestamp()) + expiresIn
+    payload = {**payload, "exp": exp}
+    header = {"alg": "HS256", "typ": "JWT"}
+    segments = [
+        _b64url_encode(json.dumps(header).encode("utf-8")),
+        _b64url_encode(json.dumps(payload).encode("utf-8")),
+    ]
+    signingInput = ".".join(segments).encode("utf-8")
+    signature = hmac.new(secret.encode("utf-8"), signingInput, sha256).digest()
+    segments.append(_b64url_encode(signature))
+    return ".".join(segments)
+
+
+async def getUserRoles(conn: Connection, userId: UUID) -> list[str]:
+    row = await conn.fetchrow(
+        """
+        SELECT ut.name
+        FROM "user" u
+        JOIN user_type ut ON u.type_id = ut.id
+        WHERE u.id = $1
+        """,
+        userId,
+    )
+    return [row["name"]] if row else []
 
 
 async def fetch_project_assessments(
