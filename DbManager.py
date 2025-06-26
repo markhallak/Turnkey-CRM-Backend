@@ -2,7 +2,7 @@ import asyncpg
 import asyncio
 import sys
 import re
-from constants import DATABASE_URL
+from constants import ASYNCPG_URL
 
 RESET_SCHEMA = """
 DROP SCHEMA public CASCADE;
@@ -51,7 +51,98 @@ CREATE TABLE IF NOT EXISTS status (
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2: PROJECT
+# 2: CLIENT
+# ──────────────────────────────────────────────────────────────────────────────
+
+CLIENT = """
+CREATE TABLE IF NOT EXISTS client (
+  id                          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_name                VARCHAR(255) NOT NULL,
+  poc_first_name              VARCHAR(255) NOT NULL,
+  poc_last_name               VARCHAR(255) NOT NULL,
+  type_id                     UUID         NOT NULL REFERENCES client_type(id)   ON UPDATE CASCADE ON DELETE RESTRICT,
+  status_id                   UUID         NOT NULL REFERENCES status(id)      ON UPDATE CASCADE ON DELETE RESTRICT,
+  address_line_1              VARCHAR(255) NOT NULL,
+  address_line_2              VARCHAR(255),
+  city                        VARCHAR(255) NOT NULL,
+  state_id                    UUID         NOT NULL REFERENCES state(id)         ON UPDATE CASCADE ON DELETE RESTRICT,
+  zip_code                    VARCHAR(255) NOT NULL,
+  general_onboarding_email    VARCHAR(255) NOT NULL,
+  phone_number_main_line      VARCHAR(255) NOT NULL,
+  accounting_email            VARCHAR(255) NOT NULL,
+  accounting_phone_number     VARCHAR(255) NOT NULL,
+  pay_terms                   VARCHAR(255) NOT NULL,
+  trip_rate                   INT          NOT NULL,
+  updates                     TEXT         NOT NULL,
+  special_notes               TEXT         NOT NULL,
+  created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
+  deleted_at                  TIMESTAMPTZ,
+  search_text TEXT
+);
+"""
+
+CLIENT_TYPE = """
+CREATE TABLE IF NOT EXISTS client_type (
+  id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  value      VARCHAR(255) NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  is_deleted BOOLEAN     NOT NULL DEFAULT FALSE,
+  deleted_at TIMESTAMPTZ
+);
+"""
+
+CLIENT_RATE = """
+CREATE TABLE IF NOT EXISTS client_rate (
+  client_id   UUID        NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE CASCADE,
+  rate_type   VARCHAR(50) NOT NULL,
+  rate_amount INT         NOT NULL,
+  PRIMARY KEY (client_id, rate_type),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  is_deleted  BOOLEAN     NOT NULL DEFAULT FALSE,
+  deleted_at  TIMESTAMPTZ
+);
+"""
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 3: USER
+# ──────────────────────────────────────────────────────────────────────────────
+
+USER = """
+CREATE TABLE IF NOT EXISTS "user" (
+  id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  email      VARCHAR(255) NOT NULL UNIQUE,
+  first_name VARCHAR(255) NOT NULL,
+  last_name  VARCHAR(255) NOT NULL,
+  hex_color  VARCHAR(7)   CHECK (hex_color ~ '^#[0-9A-Fa-f]{6}$'),
+  type_id    UUID         NOT NULL REFERENCES user_type(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+  client_id  UUID         REFERENCES client(id)    ON UPDATE CASCADE ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  setup_recovery_done BOOLEAN NOT NULL DEFAULT FALSE,
+  onboarding_done BOOLEAN NOT NULL DEFAULT FALSE,
+  is_active  BOOLEAN      NOT NULL DEFAULT FALSE,
+  is_deleted BOOLEAN      NOT NULL DEFAULT FALSE,
+  deleted_at TIMESTAMPTZ
+);
+"""
+
+USER_TYPE = """
+CREATE TABLE IF NOT EXISTS user_type (
+  id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  name       VARCHAR(255) NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  is_deleted BOOLEAN     NOT NULL DEFAULT FALSE,
+  deleted_at TIMESTAMPTZ
+);
+"""
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 4: PROJECT
 # ──────────────────────────────────────────────────────────────────────────────
 
 PROJECT = """
@@ -118,97 +209,6 @@ CREATE TABLE IF NOT EXISTS project_trade (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   is_deleted BOOLEAN     NOT NULL DEFAULT FALSE,
   deleted_at TIMESTAMPTZ
-);
-"""
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 3: USER
-# ──────────────────────────────────────────────────────────────────────────────
-
-USER = """
-CREATE TABLE IF NOT EXISTS user (
-  id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-  email      VARCHAR(255) NOT NULL UNIQUE,
-  first_name VARCHAR(255) NOT NULL,
-  last_name  VARCHAR(255) NOT NULL,
-  hex_color  VARCHAR(7)   CHECK (hex_color ~ '^#[0-9A-Fa-f]{6}$'),
-  type_id    UUID         NOT NULL REFERENCES user_type(id) ON UPDATE CASCADE ON DELETE RESTRICT,
-  client_id  UUID         REFERENCES client(id)    ON UPDATE CASCADE ON DELETE RESTRICT,
-  created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  setup_recovery_done BOOLEAN NOT NULL DEFAULT FALSE,
-  onboarding_done BOOLEAN NOT NULL DEFAULT FALSE,
-  is_active  BOOLEAN      NOT NULL DEFAULT FALSE,
-  is_deleted BOOLEAN      NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ
-);
-"""
-
-USER_TYPE = """
-CREATE TABLE IF NOT EXISTS user_type (
-  id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-  name       VARCHAR(255) NOT NULL UNIQUE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted BOOLEAN     NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ
-);
-"""
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 4: CLIENT
-# ──────────────────────────────────────────────────────────────────────────────
-
-CLIENT = """
-CREATE TABLE IF NOT EXISTS client (
-  id                          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-  company_name                VARCHAR(255) NOT NULL,
-  poc_first_name              VARCHAR(255) NOT NULL,
-  poc_last_name               VARCHAR(255) NOT NULL,
-  type_id                     UUID         NOT NULL REFERENCES client_type(id)   ON UPDATE CASCADE ON DELETE RESTRICT,
-  status_id                   UUID         NOT NULL REFERENCES status(id)      ON UPDATE CASCADE ON DELETE RESTRICT,
-  address_line_1              VARCHAR(255) NOT NULL,
-  address_line_2              VARCHAR(255),
-  city                        VARCHAR(255) NOT NULL,
-  state_id                    UUID         NOT NULL REFERENCES state(id)         ON UPDATE CASCADE ON DELETE RESTRICT,
-  zip_code                    VARCHAR(255) NOT NULL,
-  general_onboarding_email    VARCHAR(255) NOT NULL,
-  phone_number_main_line      VARCHAR(255) NOT NULL,
-  accounting_email            VARCHAR(255) NOT NULL,
-  accounting_phone_number     VARCHAR(255) NOT NULL,
-  pay_terms                   VARCHAR(255) NOT NULL,
-  trip_rate                   INT          NOT NULL,
-  updates                     TEXT         NOT NULL,
-  special_notes               TEXT         NOT NULL,
-  created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
-  deleted_at                  TIMESTAMPTZ,
-  search_text TEXT
-);
-"""
-
-CLIENT_TYPE = """
-CREATE TABLE IF NOT EXISTS client_type (
-  id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-  value      VARCHAR(255) NOT NULL UNIQUE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted BOOLEAN     NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ
-);
-"""
-
-CLIENT_RATE = """
-CREATE TABLE IF NOT EXISTS client_rate (
-  client_id   UUID        NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE CASCADE,
-  rate_type   VARCHAR(50) NOT NULL,
-  rate_amount INT         NOT NULL,
-  PRIMARY KEY (client_id, rate_type),
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted  BOOLEAN     NOT NULL DEFAULT FALSE,
-  deleted_at  TIMESTAMPTZ
 );
 """
 
@@ -852,21 +852,22 @@ async def execute_block(conn, name: str, sql: str):
 
 
 async def create_tables():
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await asyncpg.connect(ASYNCPG_URL)
     try:
         for name, sql in [
             ("extensions", EXTENSIONS),
-            ("casbin_rule", CASBIN_RULE),
+            # ("casbin_rule", CASBIN_RULE),
             ("status", STATUS),
-            ("project", PROJECT),
+            ("state", STATE),
+            ("client_type", CLIENT_TYPE),
+            ("client", CLIENT),
+            ("client_rate", CLIENT_RATE),
+            ("user_type", USER_TYPE),
+            ("user", USER),
             ("project_priority", PROJECT_PRIORITY),
             ("project_type", PROJECTS_TYPE),
             ("project_trade", PROJECTS_TRADE),
-            ("user", USER),
-            ("user_type", USER_TYPE),
-            ("client", CLIENT),
-            ("client_type", CLIENT_TYPE),
-            ("client_rate", CLIENT_RATE),
+            ("project", PROJECT),
             ("document", DOCUMENT),
             ("quote", QUOTE),
             ("invoice", INVOICE),
@@ -877,7 +878,6 @@ async def create_tables():
             ("user_key", USER_KEY),
             ("insurance", INSURANCE),
             ("notification", NOTIFICATION),
-            ("state", STATE),
             ("alter", ALTERS),
             ("views", VIEWS),
             ("prepares", PREPARES),
@@ -894,7 +894,7 @@ async def create_tables():
 
 
 async def reset_schema():
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await asyncpg.connect(ASYNCPG_URL)
     try:
         await conn.execute(RESET_SCHEMA)
         print("🗑️ Public schema reset successfully.")

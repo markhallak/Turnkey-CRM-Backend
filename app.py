@@ -5,19 +5,19 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Optional
 from uuid import UUID
-
-import casbin_async_sqlalchemy_adapter
+import uvicorn
+from casbin_sqlalchemy_adapter import Adapter
 import sqlalchemy
 from asyncpg import create_pool, Pool, Connection
-from casbin import AsyncEnforcer
-from casbin_redis_watcher import RedisWatcher
+from casbin import SyncedEnforcer
+from casbin_redis_watcher import new_watcher, WatcherOptions
 from databases import Database
 from fastapi import FastAPI, HTTPException, Query, Body, Request, Depends, status
 
-from constants import DATABASE_URL
+from constants import ASYNCPG_URL, SQLALCHEMY_URL, INITIAL_POLICIES, SECRET_KEY
 from util import isUUIDv4, createMagicLink, generateJwt, getUserRoles
 
-database = Database(DATABASE_URL)
+database = Database(ASYNCPG_URL)
 metadata = sqlalchemy.MetaData()
 casbin_table = sqlalchemy.Table(
     "casbin_rule",
@@ -31,18 +31,16 @@ casbin_table = sqlalchemy.Table(
     sqlalchemy.Column("extra", sqlalchemy.String(255)),
 )
 
-adapter = casbin_async_sqlalchemy_adapter.Adapter(DATABASE_URL)
-enforcer = AsyncEnforcer("model.conf", adapter)
+adapter = Adapter(SQLALCHEMY_URL)
+enforcer = SyncedEnforcer("model.conf", adapter)
 enforcer.enable_auto_save(True)
-enforcer.enable_log(True)
-watcher = RedisWatcher("redis://localhost:6379")
+opts = WatcherOptions()
+opts.host = "localhost"
+opts.port = "6379"
+watcher = new_watcher(opts)
 enforcer.set_watcher(watcher)
-
-async def on_policy_change(_msg: str = ""):
-    await enforcer.load_policy()
-
-watcher.set_update_callback(lambda msg: asyncio.create_task(on_policy_change(msg)))
-
+watcher.set_update_callback(lambda msg: asyncio.create_task(enforcer.load_policy()))
+enforcer.set_watcher(watcher)
 
 class SimpleUser:
     def __init__(self, username: str, setup_done: bool, onboarding_done: bool):
@@ -77,24 +75,40 @@ async def authorize(request: Request, user: SimpleUser = Depends(getCurrentUser)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     return True
 
-SECRET_KEY = "dev-secret"
+
+
+def seed_policies(e):
+    if not e.get_policy():               # table empty? then seed
+        e.add_policies([("p",)+tpl for tpl in INITIAL_POLICIES])
+        e.save_policy()                  # commits to DB
+        print("✅  Seeded initial Casbin policies")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # startup logic
+    loop = asyncio.get_running_loop()
     app.state.db_pool: Pool = await create_pool(
-        dsn=DATABASE_URL, min_size=5, max_size=20
+        dsn=ASYNCPG_URL, min_size=5, max_size=20
     )
     print("DB pool created")
     await database.connect()
-    await enforcer.load_policy()
-    yield
+    enforcer.load_policy()
+    seed_policies(enforcer)
+    enforcer.load_policy()
+    seed_policies(enforcer)
 
-    # shutdown logic
-    await app.state.db_pool.close()
-    await database.disconnect()
-    print("DB pool closed")
+    def _update(_msg: str):
+        loop.call_soon_threadsafe(enforcer.load_policy)
+
+    watcher.set_update_callback(_update)
+
+    try:
+        yield
+    finally:
+        await app.state.db_pool.close()
+        await database.disconnect()
+        print("DB pool closed")
 
 
 app = FastAPI(lifespan=lifespan, dependencies=[Depends(authorize)])
@@ -759,7 +773,6 @@ async def fetchProjectQuotesEndpoint(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     total = rows[0]["total_count"] if rows else 0
-
 
     if rows:
         last = rows[-1]
@@ -1620,6 +1633,7 @@ async def createNewInvoice(
 
     return {"invoiceId": invoiceId}
 
+
 ################################################################################
 # TODO:                         QUOTE ENDPOINTS                              #
 ################################################################################
@@ -1711,7 +1725,6 @@ async def getQuote(
     if not row:
         raise HTTPException(status_code=404, detail=f"Quote {id} not found")
     return {"quote": dict(row)}
-
 
 
 ################################################################################
@@ -2053,6 +2066,7 @@ async def signUp(u: str = Query(...), s: str = Query(...), conn: Connection = De
     res.set_cookie("token", token, httponly=True, secure=True, max_age=900)
     return res
 
+
 @app.post("/auth/setup-recovery")
 async def setupRecovery(payload: dict = Body(), conn: Connection = Depends(get_conn)):
     userId = payload.get("userId")
@@ -2105,6 +2119,4 @@ async def completeOnboarding(payload: dict = Body(), conn: Connection = Depends(
 
 
 if __name__ == "__main__":
-    import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
