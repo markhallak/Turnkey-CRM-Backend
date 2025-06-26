@@ -1,4 +1,8 @@
 import casbin
+import sqlalchemy
+from databases import Database
+from casbin_adapter import CasbinAdapter
+from constants import DATABASE_URL
 import pytest
 
 def auto_enforce(enforcer, sub: str, obj: str, act: str) -> bool:
@@ -11,7 +15,21 @@ def auto_enforce(enforcer, sub: str, obj: str, act: str) -> bool:
 
 @pytest.fixture(scope="module")
 def enforcer():
-    e = casbin.Enforcer("model.conf", "policy.csv")
+    database = Database(DATABASE_URL)
+    metadata = sqlalchemy.MetaData()
+    casbin_table = sqlalchemy.Table(
+        "casbin_rule",
+        metadata,
+        sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+        sqlalchemy.Column("ptype", sqlalchemy.String(255)),
+        sqlalchemy.Column("subject", sqlalchemy.String(255)),
+        sqlalchemy.Column("domain", sqlalchemy.String(255)),
+        sqlalchemy.Column("object", sqlalchemy.String(255)),
+        sqlalchemy.Column("action", sqlalchemy.String(255)),
+        sqlalchemy.Column("extra", sqlalchemy.String(255)),
+    )
+    adapter = CasbinAdapter(database, casbin_table)
+    e = casbin.Enforcer("model.conf", adapter)
     e.enable_auto_save(True)
     return e
 

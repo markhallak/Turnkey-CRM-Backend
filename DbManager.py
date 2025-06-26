@@ -17,6 +17,22 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
+# CASBIN RULE TABLE
+# ──────────────────────────────────────────────────────────────────────────────
+
+CASBIN_RULE = """
+CREATE TABLE IF NOT EXISTS casbin_rule (
+  id SERIAL PRIMARY KEY,
+  ptype VARCHAR(100) NOT NULL,
+  subject VARCHAR(100) NOT NULL,
+  domain VARCHAR(100) NOT NULL,
+  object VARCHAR(100) NOT NULL,
+  action VARCHAR(100) NOT NULL,
+  extra VARCHAR(100)
+);
+"""
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 1: STATUS
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -840,6 +856,7 @@ async def create_tables():
     try:
         for name, sql in [
             ("extensions", EXTENSIONS),
+            ("casbin_rule", CASBIN_RULE),
             ("status", STATUS),
             ("project", PROJECT),
             ("project_priority", PROJECT_PRIORITY),

@@ -1,19 +1,47 @@
+import asyncio
+import hmac
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-import hmac
 from hashlib import sha256
 from typing import Optional
 from uuid import UUID
 
+import casbin_async_sqlalchemy_adapter
+import sqlalchemy
 from asyncpg import create_pool, Pool, Connection
+from casbin import AsyncEnforcer
+from casbin_redis_watcher import RedisWatcher
+from databases import Database
 from fastapi import FastAPI, HTTPException, Query, Body, Request, Depends, status
-import casbin
+
 from constants import DATABASE_URL
 from util import isUUIDv4, createMagicLink, generateJwt, getUserRoles
 
-enforcer = casbin.Enforcer("model.conf", "policy.csv")
+database = Database(DATABASE_URL)
+metadata = sqlalchemy.MetaData()
+casbin_table = sqlalchemy.Table(
+    "casbin_rule",
+    metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("ptype", sqlalchemy.String(255)),
+    sqlalchemy.Column("subject", sqlalchemy.String(255)),
+    sqlalchemy.Column("domain", sqlalchemy.String(255)),
+    sqlalchemy.Column("object", sqlalchemy.String(255)),
+    sqlalchemy.Column("action", sqlalchemy.String(255)),
+    sqlalchemy.Column("extra", sqlalchemy.String(255)),
+)
+
+adapter = casbin_async_sqlalchemy_adapter.Adapter(DATABASE_URL)
+enforcer = AsyncEnforcer("model.conf", adapter)
 enforcer.enable_auto_save(True)
 enforcer.enable_log(True)
+watcher = RedisWatcher("redis://localhost:6379")
+enforcer.set_watcher(watcher)
+
+async def on_policy_change(_msg: str = ""):
+    await enforcer.load_policy()
+
+watcher.set_update_callback(lambda msg: asyncio.create_task(on_policy_change(msg)))
 
 
 class SimpleUser:
@@ -59,10 +87,13 @@ async def lifespan(app: FastAPI):
         dsn=DATABASE_URL, min_size=5, max_size=20
     )
     print("DB pool created")
+    await database.connect()
+    await enforcer.load_policy()
     yield
 
     # shutdown logic
     await app.state.db_pool.close()
+    await database.disconnect()
     print("DB pool closed")
 
 
