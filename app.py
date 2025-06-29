@@ -229,23 +229,22 @@ async def getNotifications(
     }
 
 
-# TODO: Still needs work, check the user_type, and the client_id if we need to return those
 @app.get("/get-profile-details")
 async def getProfileDetails(
-        user_id: UUID = Query(..., description="UUID of the user whose profile to fetch"),
+        email: UUID = Query(..., description="UUID of the user whose profile to fetch"),
         conn: Connection = Depends(get_conn)
 ):
     sql = """
             SELECT first_name, hex_color
             FROM "user"
-            WHERE id = $1
+            WHERE email = $1
               AND is_deleted = FALSE
             LIMIT 1;
         """
 
-    row = await conn.fetchrow(sql, user_id)
+    row = await conn.fetchrow(sql, email)
     if not row:
-        raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+        raise HTTPException(status_code=404, detail=f"User {email} not found")
 
     return {
         "first_name": row["first_name"],
