@@ -118,28 +118,18 @@ CREATE TABLE IF NOT EXISTS "user" (
   first_name VARCHAR(255) NOT NULL,
   last_name  VARCHAR(255) NOT NULL,
   hex_color  VARCHAR(7)   CHECK (hex_color ~ '^#[0-9A-Fa-f]{6}$'),
-  type_id    UUID         NOT NULL REFERENCES user_type(id) ON UPDATE CASCADE ON DELETE RESTRICT,
   client_id  UUID         REFERENCES client(id)    ON UPDATE CASCADE ON DELETE RESTRICT,
   created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
   setup_recovery_done BOOLEAN NOT NULL DEFAULT FALSE,
   onboarding_done BOOLEAN NOT NULL DEFAULT FALSE,
-  is_active  BOOLEAN      NOT NULL DEFAULT FALSE,
+  is_active  BOOLEAN      NOT NULL DEFAULT TRUE,
+  is_client  BOOLEAN      NOT NULL DEFAULT FALSE,
   is_deleted BOOLEAN      NOT NULL DEFAULT FALSE,
   deleted_at TIMESTAMPTZ
 );
 """
 
-USER_TYPE = """
-CREATE TABLE IF NOT EXISTS user_type (
-  id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-  name       VARCHAR(255) NOT NULL UNIQUE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted BOOLEAN     NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ
-);
-"""
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 4: PROJECT
@@ -293,8 +283,7 @@ CREATE TABLE IF NOT EXISTS message (
   file_attachment_id UUID         REFERENCES document(id)      ON UPDATE CASCADE ON DELETE RESTRICT,
   is_deleted         BOOLEAN      NOT NULL DEFAULT FALSE,
   deleted_at         TIMESTAMPTZ,
-  has_mentions       BOOLEAN      NOT NULL DEFAULT FALSE
-  ,
+  has_mentions       BOOLEAN      NOT NULL DEFAULT FALSE,
   search_text TEXT
 );
 """
@@ -316,13 +305,30 @@ CREATE TABLE IF NOT EXISTS message_mention (
 MAGIC_LINK = """
 CREATE TABLE IF NOT EXISTS magic_link (
   uuid           UUID        PRIMARY KEY,
-  user_id        UUID        NOT NULL REFERENCES "user"(id),
+  user_id        UUID        REFERENCES "user"(id),
   sig            VARCHAR(255) NOT NULL,
   expires_at     TIMESTAMPTZ NOT NULL,
   consumed       BOOLEAN     NOT NULL DEFAULT FALSE,
   purpose        VARCHAR(32) NOT NULL,
-  redirect_path  TEXT
+  send_to         VARCHAR(255) NOT NULL
 );
+"""
+
+MAGIC_LINK_LISTEN_NOTIFY = """
+CREATE OR REPLACE FUNCTION notify_magic_link_insert() RETURNS trigger AS $$
+DECLARE
+  payload TEXT;
+BEGIN
+  payload := row_to_json(NEW)::text;
+  PERFORM pg_notify('new_magic_link_row', payload);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_new_magic_link_row
+  AFTER INSERT ON magic_link
+  FOR EACH ROW
+  EXECUTE FUNCTION notify_magic_link_insert();
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -393,10 +399,28 @@ NOTIFICATION = """
 CREATE TABLE IF NOT EXISTS notification (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   triggered_by_category VARCHAR(100) NOT NULL,
-  triggered_by_id UUID,
+  triggered_by_user VARCHAR(255),
   content TEXT NOT NULL,
+  isProcessed BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+"""
+
+NOTIFICATION_LISTEN_NOTIFY = """
+CREATE OR REPLACE FUNCTION notify_notification_insert() RETURNS trigger AS $$
+DECLARE
+  payload TEXT;
+BEGIN
+  payload := row_to_json(NEW)::text;
+  PERFORM pg_notify('new_notification_row', payload);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_new_notification_row
+  AFTER INSERT ON notification
+  FOR EACH ROW
+  EXECUTE FUNCTION notify_notification_insert();
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -624,7 +648,6 @@ CREATE INDEX IF NOT EXISTS idx_project_due_month ON project (EXTRACT(MONTH FROM 
 CREATE INDEX IF NOT EXISTS idx_project_event_cursor ON project ((COALESCE(scheduled_date, due_date)) DESC, id DESC) WHERE is_deleted = FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_project_type_deleted_value ON project_type (is_deleted, value);
-CREATE INDEX IF NOT EXISTS idx_user_type        ON "user"(type_id);
 CREATE INDEX IF NOT EXISTS idx_client_type      ON client(type_id);
 CREATE INDEX IF NOT EXISTS idx_client_state     ON client(state_id);
 CREATE INDEX IF NOT EXISTS idx_client_rate      ON client_rate(client_id);
@@ -856,13 +879,12 @@ async def create_tables():
     try:
         for name, sql in [
             ("extensions", EXTENSIONS),
-            # ("casbin_rule", CASBIN_RULE),
+            ("casbin_rule", CASBIN_RULE),
             ("status", STATUS),
             ("state", STATE),
             ("client_type", CLIENT_TYPE),
             ("client", CLIENT),
             ("client_rate", CLIENT_RATE),
-            ("user_type", USER_TYPE),
             ("user", USER),
             ("project_priority", PROJECT_PRIORITY),
             ("project_type", PROJECTS_TYPE),
@@ -874,10 +896,12 @@ async def create_tables():
             ("message", MESSAGE),
             ("message_mention", MESSAGE_MENTION),
             ("magic_link", MAGIC_LINK),
+            ("magic_link_listen_notify", MAGIC_LINK_LISTEN_NOTIFY),
             ("password", PASSWORD),
             ("user_key", USER_KEY),
             ("insurance", INSURANCE),
             ("notification", NOTIFICATION),
+            ("notification_listen_notify", NOTIFICATION_LISTEN_NOTIFY),
             ("alter", ALTERS),
             ("views", VIEWS),
             ("prepares", PREPARES),
@@ -886,6 +910,56 @@ async def create_tables():
             ("triggers", TRIGGERS),
         ]:
             await execute_block(conn, name, sql)
+
+        if await conn.fetchval("SELECT count(*) FROM casbin_rule") == 0:
+            await conn.fetchval(
+                """
+                INSERT INTO "user" (
+                  email,
+                  first_name,
+                  last_name,
+                  hex_color,
+                  client_id,
+                  is_active,
+                  is_client
+                ) VALUES (
+                  'markhallak@outlook.com',
+                  'Mark',
+                  'Hallak',
+                  '#FF0000',
+                  NULL,
+                  TRUE,
+                  FALSE
+                );
+                """
+            )
+
+
+            await conn.executemany(
+                """
+                INSERT INTO casbin_rule (ptype, subject, domain, object, action)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT DO NOTHING;
+                """,
+                [
+                    ("p", "employee_admin", "*", "*", "*"),
+                    ("p", "employee_account_manager", "*", "/clients", "*"),
+                    ("p", "employee_account_manager", "*", "/clients/*", "*"),
+                    ("p", "employee_account_manager", "*", "/projects", "*"),
+                    ("p", "employee_account_manager", "*", "/projects/*", "*"),
+                    ("p", "employee_account_manager", "*", "/get-messages", "*"),
+                    ("p", "employee_account_manager", "*", "/send-message", "*"),
+
+                    ("p", "client_admin", "*", "/projects", "*"),
+                    ("p", "client_admin", "*", "/send-message", "*"),
+
+                    ("p", "client_technician", "*", "/projects", "read_without_financial"),
+                    ("p", "client_technician", "*", "/projects/view/*", "read_without_financial"),
+                    ("p", "client_technician", "*", "/get-messages", "*"),
+
+                    ("g", "markhallak@outlook.com", "employee_admin", "*", "")
+                ]
+            )
 
         # Moved outside the loop
         print("\n🎉 Schema creation complete.")

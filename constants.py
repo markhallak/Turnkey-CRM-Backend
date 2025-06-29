@@ -4,7 +4,6 @@ DB_USER = "postgres"
 DB_PASSWORD = "crm-issam"
 DB_NAME = "postgres"
 ASYNCPG_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-SQLALCHEMY_URL = "postgresql+psycopg2://postgres:crm-issam@localhost:5400/postgres"
 
 SECRET_KEY = "dev-secret"
 

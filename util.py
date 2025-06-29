@@ -22,14 +22,10 @@ async def isUUIDv4(u: str) -> bool:
 
 
 async def hasUnexpiredMagicLink(
-    db_pool,
-    user_id: UUID,
-    purpose: str
+        db_pool,
+        user_id: UUID,
+        purpose: str
 ) -> bool:
-    """
-    Returns True if there is an existing row in `magic_links`
-    for (user_id, purpose) where consumed = FALSE AND expires_at > now().
-    """
     sql = """
         SELECT 1
         FROM magic_link
@@ -46,14 +42,12 @@ async def hasUnexpiredMagicLink(
 
 
 async def createMagicLink(
-    conn: Connection,
-    user_id: UUID,
-    server_secret: str,
-    purpose: str = "setup-recovery",
-    redirect_path: str = "/setup-recovery",
-    ttlHours: int = 24
+        conn: Connection,
+        server_secret: str,
+        purpose: str,
+        recipientEmail: str,
+        ttlHours: int = 24,
 ) -> tuple[str, str]:
-
     # 1) Generate a new UUID v4
     new_uuid = uuid4()
 
@@ -71,17 +65,17 @@ async def createMagicLink(
     # 4) Insert into magic_links table
     sql = """
         INSERT INTO magic_link (
-          uuid, user_id, sig, expires_at, consumed, purpose, redirect_path
-        ) VALUES ($1, $2, $3, $4, FALSE, $5, $6);
+          uuid, sig, expires_at, consumed, purpose, send_to
+        ) VALUES ($1, $2, $3, FALSE, $4, $5);
     """
+
     await conn.execute(
         sql,
         new_uuid,
-        user_id,
         signature,
         expires_at,
         purpose,
-        redirect_path,
+        recipientEmail
     )
 
     return str(new_uuid), signature
@@ -105,22 +99,10 @@ def generateJwt(payload: dict, secret: str, expiresIn: int) -> str:
     return ".".join(segments)
 
 
-async def getUserRoles(conn: Connection, userId: UUID) -> list[str]:
-    row = await conn.fetchrow(
-        """
-        SELECT ut.name
-        FROM "user" u
-        JOIN user_type ut ON u.type_id = ut.id
-        WHERE u.id = $1
-        """,
-        userId,
-    )
-    return [row["name"]] if row else []
-
-
+# TODO: Make it an endpoint
 async def fetch_project_assessments(
-    db_pool: Pool,
-    project_id: str
+        db_pool: Pool,
+        project_id: str
 ) -> Optional[Record]:
     """
     Fetch the “Visit Notes”, “Planned Resolution”, and “Material/Parts Needed”
@@ -149,4 +131,3 @@ async def fetch_project_assessments(
         rec = await conn.fetchrow(sql, project_id)
     dt = perf_counter() - start
     return rec
-

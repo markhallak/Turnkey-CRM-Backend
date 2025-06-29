@@ -1,113 +1,123 @@
 import asyncio
 import hmac
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Optional
 from uuid import UUID
+
 import uvicorn
-from casbin_sqlalchemy_adapter import Adapter
-import sqlalchemy
 from asyncpg import create_pool, Pool, Connection
 from casbin import SyncedEnforcer
 from casbin_redis_watcher import new_watcher, WatcherOptions
 from databases import Database
 from fastapi import FastAPI, HTTPException, Query, Body, Request, Depends, status
+from fastapi.responses import JSONResponse
+from sqlalchemy import Table, Column, Integer, String, MetaData
 
-from constants import ASYNCPG_URL, SQLALCHEMY_URL, INITIAL_POLICIES, SECRET_KEY
-from util import isUUIDv4, createMagicLink, generateJwt, getUserRoles
+from CasbinAdapter import CasbinAdapter
+from constants import ASYNCPG_URL, SECRET_KEY
+from util import isUUIDv4, createMagicLink, generateJwt
 
-database = Database(ASYNCPG_URL)
-metadata = sqlalchemy.MetaData()
-casbin_table = sqlalchemy.Table(
-    "casbin_rule",
-    metadata,
-    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
-    sqlalchemy.Column("ptype", sqlalchemy.String(255)),
-    sqlalchemy.Column("subject", sqlalchemy.String(255)),
-    sqlalchemy.Column("domain", sqlalchemy.String(255)),
-    sqlalchemy.Column("object", sqlalchemy.String(255)),
-    sqlalchemy.Column("action", sqlalchemy.String(255)),
-    sqlalchemy.Column("extra", sqlalchemy.String(255)),
-)
-
-adapter = Adapter(SQLALCHEMY_URL)
-enforcer = SyncedEnforcer("model.conf", adapter)
-enforcer.enable_auto_save(True)
-opts = WatcherOptions()
-opts.host = "localhost"
-opts.port = "6379"
-watcher = new_watcher(opts)
-enforcer.set_watcher(watcher)
-watcher.set_update_callback(lambda msg: asyncio.create_task(enforcer.load_policy()))
-enforcer.set_watcher(watcher)
 
 class SimpleUser:
-    def __init__(self, username: str, setup_done: bool, onboarding_done: bool):
-        self.username = username
+    def __init__(self, id: UUID, email: str, setup_done: bool, onboarding_done: bool):
+        self.id = id
+        self.email = email
         self.setup_done = setup_done
         self.onboarding_done = onboarding_done
 
 
-async def getCurrentUser(request: Request) -> SimpleUser:
-    username = request.headers.get("x-username", "guest")
-    async with request.app.state.db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT setup_recovery_done, onboarding_done FROM \"user\" WHERE email=$1",
-            username,
-        )
-    if row:
-        return SimpleUser(username, row["setup_recovery_done"], row["onboarding_done"])
-    return SimpleUser(username, True, True)
+async def getCurrentUser(request: Request) -> SimpleUser | None:
+    email = request.headers.get("x-user-email", None)
+
+    if email:
+        async with request.app.state.db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, setup_recovery_done, onboarding_done FROM \"user\" WHERE email=$1",
+                email,
+            )
+        if row:
+            return SimpleUser(row["id"], email, row["setup_recovery_done"], row["onboarding_done"])
+    return None
 
 
-async def authorize(request: Request, user: SimpleUser = Depends(getCurrentUser)):
+def getEnforcer(request: Request) -> SyncedEnforcer:
+    return request.app.state.enforcer
+
+
+async def authorize(request: Request, user: SimpleUser = Depends(getCurrentUser),
+                    enforcer: SyncedEnforcer = Depends(getEnforcer)):
     path = request.url.path
-    if not user.setup_done and not path.startswith("/auth") and path != "/setup-recovery":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Finish setup recovery")
-    if user.setup_done and not user.onboarding_done and not path.startswith("/auth") and path != "/onboarding":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Finish onboarding")
-    sub = user.username
-    domain = "global"
+    #
+    # if not user.setup_done and not path.startswith("/auth") and path != "/setup-recovery":
+    #     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Finish setup recovery")
+    # if user.setup_done and not user.onboarding_done and not path.startswith("/auth") and path != "/onboarding":
+    #     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Finish onboarding")
+
+    sub = str(user.email)
+    domain = "*"
     obj = path
     act = request.method.lower()
+
     if not enforcer.enforce(sub, domain, obj, act):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
     return True
-
-
-
-def seed_policies(e):
-    if not e.get_policy():               # table empty? then seed
-        e.add_policies([("p",)+tpl for tpl in INITIAL_POLICIES])
-        e.save_policy()                  # commits to DB
-        print("✅  Seeded initial Casbin policies")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # startup logic
+    metadata = MetaData()
+    casbin_rule = Table(
+        "casbin_rule", metadata,
+        Column("id", Integer, primary_key=True),
+        Column("ptype", String(100), nullable=False),
+        Column("subject", String(255), nullable=False),
+        Column("domain", String(255), nullable=False),
+        Column("object", String(255), nullable=False),
+        Column("action", String(255), nullable=False),
+        Column("extra", String(255)),
+    )
+    db = Database(ASYNCPG_URL)
+    await db.connect()
+
+    adapter = CasbinAdapter(db=db, table=casbin_rule)
+    enforcer = SyncedEnforcer("model.conf", adapter)
+    enforcer.enable_auto_save(True)
+    opts = WatcherOptions()
+    opts.host = "localhost"
+    opts.port = "6379"
+    watcher = new_watcher(opts)
+    watcher.set_update_callback(lambda msg: asyncio.create_task(enforcer.load_policy()))
+    enforcer.set_watcher(watcher)
+
+    await adapter.load_policy(enforcer.get_model())
+    enforcer.build_role_links()
+
+    app.state.enforcer = enforcer
+
     loop = asyncio.get_running_loop()
     app.state.db_pool: Pool = await create_pool(
         dsn=ASYNCPG_URL, min_size=5, max_size=20
     )
     print("DB pool created")
-    await database.connect()
-    enforcer.load_policy()
-    seed_policies(enforcer)
-    enforcer.load_policy()
-    seed_policies(enforcer)
 
     def _update(_msg: str):
         loop.call_soon_threadsafe(enforcer.load_policy)
 
+    def _on_change(_msg: str):
+        asyncio.create_task(adapter.load_policy(enforcer.get_model()))
+
+    watcher.set_update_callback(_on_change)
     watcher.set_update_callback(_update)
 
     try:
         yield
     finally:
         await app.state.db_pool.close()
-        await database.disconnect()
         print("DB pool closed")
 
 
@@ -588,10 +598,6 @@ async def fetchProject(
           JOIN "user" cu
             ON cu.id = p.client_id
            AND cu.is_deleted = FALSE
-
-          JOIN user_type cut
-            ON cut.id = cu.type_id
-           AND cut.is_deleted = FALSE
 
           LEFT JOIN client c
             ON c.id = cu.client_id
@@ -1988,35 +1994,32 @@ async def updateInsuranceData(
 
 
 @app.post("/auth/invite")
-async def inviteUser(payload: dict = Body(), conn: Connection = Depends(get_conn)):
-    userId = payload.get("userId")
-    if not userId or not isUUIDv4(userId):
-        raise HTTPException(status_code=400, detail="Invalid userId")
+async def inviteUser(
+        request: Request,
+        payload: dict = Body(),
+        conn: Connection = Depends(get_conn)
+):
+    email_to_invite = payload.get("emailToInvite")
+    account_type = payload.get("accountType")
 
-    email = await conn.fetchval("SELECT email FROM \"user\" WHERE id=$1", UUID(userId))
-    if not email:
-        raise HTTPException(status_code=404, detail="User not found")
+    if not email_to_invite:
+        raise HTTPException(status_code=400, detail="Invalid email")
+    if not account_type:
+        raise HTTPException(status_code=400, detail="Invalid account type")
 
-    uuidStr, sig = await createMagicLink(
+    await createMagicLink(
         conn,
-        UUID(userId),
-        SECRET_KEY,
-        purpose="invite",
-        redirect_path="/sign-up",
-        ttlHours=6,
+        server_secret=SECRET_KEY,
+        purpose="signup",
+        recipientEmail=email_to_invite
     )
-    link = f"/auth/sign-up?u={uuidStr}&s={sig}"
-    await conn.execute(
-        "INSERT INTO notification (triggered_by_category, triggered_by_id, content) VALUES ($1,$2,$3)",
-        "auth",
-        UUID(userId),
-        link,
-    )
+
     return {"status": "link sent"}
 
 
 @app.post("/auth/login")
-async def login(payload: dict = Body(), conn: Connection = Depends(get_conn)):
+async def login(payload: dict = Body(), conn: Connection = Depends(get_conn),
+                enforcer: SyncedEnforcer = Depends(getEnforcer)):
     email = payload.get("email")
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
@@ -2026,12 +2029,11 @@ async def login(payload: dict = Body(), conn: Connection = Depends(get_conn)):
     userId = row["id"]
     uuidStr, sig = await createMagicLink(
         conn,
-        userId,
         SECRET_KEY,
         purpose="login",
-        redirect_path="/dashboard",
         ttlHours=1,
     )
+
     link = f"/auth/sign-up?u={uuidStr}&s={sig}"
     await conn.execute(
         "INSERT INTO notification (triggered_by_category, triggered_by_id, content) VALUES ($1,$2,$3)",
@@ -2039,36 +2041,43 @@ async def login(payload: dict = Body(), conn: Connection = Depends(get_conn)):
         userId,
         link,
     )
+
     return {"status": "link sent"}
 
 
-@app.get("/auth/sign-up")
-async def signUp(u: str = Query(...), s: str = Query(...), conn: Connection = Depends(get_conn)):
+@app.post("/auth/sign-up")
+async def signUp(u: str = Query(...), s: str = Query(...), conn: Connection = Depends(get_conn),
+                 enforcer: SyncedEnforcer = Depends(getEnforcer)):
     if not isUUIDv4(u):
         raise HTTPException(status_code=400, detail="Invalid uuid")
+
     row = await conn.fetchrow(
         "SELECT m.user_id, m.sig, m.expires_at, m.consumed, u.email FROM magic_link m JOIN \"user\" u ON m.user_id=u.id WHERE m.uuid=$1 AND m.purpose='invite'",
         UUID(u),
     )
+
     if not row:
         raise HTTPException(status_code=400, detail="Link not found")
+
     computed = hmac.new(SECRET_KEY.encode("utf-8"), u.encode("utf-8"), sha256).hexdigest()
+
     if not hmac.compare_digest(computed, s) or row["sig"] != s:
         raise HTTPException(status_code=400, detail="Invalid signature")
     if row["consumed"] or row["expires_at"] < datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="Link expired")
+
     await conn.execute("UPDATE magic_link SET consumed=TRUE WHERE uuid=$1", UUID(u))
-    roles = await getUserRoles(conn, row["user_id"])
-    token = generateJwt({"sub": str(row["user_id"]), "scope": "set_recovery_phrase", "roles": roles}, SECRET_KEY, 900)
+
+    token = generateJwt({"userId": str(row["user_id"]), "scope": "set_recovery_phrase"}, SECRET_KEY, 900)
     response = {"userId": str(row["user_id"]), "username": row["email"]}
-    from fastapi.responses import JSONResponse
     res = JSONResponse(content=response)
     res.set_cookie("token", token, httponly=True, secure=True, max_age=900)
     return res
 
 
 @app.post("/auth/setup-recovery")
-async def setupRecovery(payload: dict = Body(), conn: Connection = Depends(get_conn)):
+async def setupRecovery(payload: dict = Body(), conn: Connection = Depends(get_conn),
+                        enforcer: SyncedEnforcer = Depends(getEnforcer)):
     userId = payload.get("userId")
     encSalt = payload.get("salt")
     encParams = payload.get("kdfParams")
@@ -2100,14 +2109,14 @@ async def setupRecovery(payload: dict = Body(), conn: Connection = Depends(get_c
         userId,
     )
 
-    roles = await getUserRoles(conn, UUID(userId))
-    access = generateJwt({"sub": userId, "roles": roles}, SECRET_KEY, 900)
-    refresh = generateJwt({"sub": userId, "scope": "refresh", "roles": roles}, SECRET_KEY, 1209600)
+    access = generateJwt({"userId": userId}, SECRET_KEY, 900)
+    refresh = generateJwt({"userId": userId, "scope": "refresh"}, SECRET_KEY, 1209600)
     return {"access": access, "refresh": refresh}
 
 
 @app.post("/auth/complete-onboarding")
-async def completeOnboarding(payload: dict = Body(), conn: Connection = Depends(get_conn)):
+async def completeOnboarding(payload: dict = Body(), conn: Connection = Depends(get_conn),
+                             enforcer: SyncedEnforcer = Depends(getEnforcer)):
     userId = payload.get("userId")
     if not userId or not isUUIDv4(userId):
         raise HTTPException(status_code=400, detail="Invalid userId")
@@ -2115,6 +2124,11 @@ async def completeOnboarding(payload: dict = Body(), conn: Connection = Depends(
         "UPDATE \"user\" SET onboarding_done=TRUE WHERE id=$1",
         userId,
     )
+    return {"status": "ok"}
+
+
+@app.get("/connection-test")
+async def connectionTest():
     return {"status": "ok"}
 
 

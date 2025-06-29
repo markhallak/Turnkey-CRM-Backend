@@ -38,3 +38,4 @@ class CasbinAdapter(DatabasesAdapter):
                 query = query.where(self.table.columns[keys[field_index + i]] == value)
         result = await self.db.execute(query)
         return True if result else False
+
