@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import asyncio
+from uuid import UUID
 
 import asyncpg
 import requests
@@ -87,11 +89,11 @@ async def handle_magic_link(connection, pid, channel, payload):
     purpose = data.get("purpose")
 
     if purpose == "signup":
-        subject = "Your Magic Login Link"
+        subject = "Create Your Account"
 
-        if data.get("uuid") and data.get("sig"):
-            frontend_base = os.getenv("FRONTEND_BASE_URL", "http://localhost:8000")
-            link = f"{frontend_base}/auth/sign-up?uuid={data['uuid']}&sig={data['sig']}"
+        if data.get("token"):
+            frontend_base = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000")
+            link = f"{frontend_base}/set-recovery-phrase?token={data['token']}"
 
             htmlBody = f"""
             <!DOCTYPE html>
@@ -170,10 +172,10 @@ async def handle_magic_link(connection, pid, channel, payload):
                         <!-- Body -->
                         <tr>
                           <td class="content">
-                            <p>Hello,</p>
-                            <p>Click the button below to securely log in to your account. This link will expire at <strong>{data.get('expires_at')}</strong>.</p>
+                            <p>Dear User,</p>
+                            <p>Click the button below to create your account. This link will expire within <strong>24 hours</strong>.</p>
                             <div class="button-container">
-                              <a href="{link}" target="_blank" rel="noopener noreferrer" class="btn">Log In Now</a>
+                              <a href="{link}" target="_blank" rel="noopener noreferrer" class="btn">Sign up Now</a>
                             </div>
                             <p>If the button doesn’t work, copy and paste the following URL into your browser:</p>
                             <p><a href="{link}" target="_blank" rel="noopener noreferrer" style="color:#4a90e2; word-break:break-all;">{link}</a></p>
@@ -197,7 +199,10 @@ async def handle_magic_link(connection, pid, channel, payload):
             sent = await send_email(subject, htmlBody, recipient)
 
             if sent:
-                # TODO: Make a db call to check process field for the magic link
+                await connection.execute(
+                    "UPDATE magic_link SET is_sent=TRUE WHERE uuid=$1",
+                    UUID(data.get("uuid"))
+                )
                 print("Sent magic link by email")
 
             return
@@ -211,6 +216,20 @@ async def listener():
     await conn.add_listener(NOTIFICATION_CHANNEL, handle_notification)
     await conn.add_listener(MAGIC_LINK_CHANNEL, handle_magic_link)
     print(f"Listening on '{NOTIFICATION_CHANNEL}' and '{MAGIC_LINK_CHANNEL}'...")
+
+    async def resend_unsent():
+        pool = await asyncpg.create_pool(dsn=ASYNCPG_URL)
+        try:
+            while True:
+                async with pool.acquire() as c:
+                    rows = await c.fetch("SELECT * FROM magic_link WHERE is_sent=FALSE")
+                    for r in rows:
+                        await handle_magic_link(c, 0, MAGIC_LINK_CHANNEL, json.dumps(dict(r), default=str))
+                await asyncio.sleep(60)
+        finally:
+            await pool.close()
+
+    asyncio.create_task(resend_unsent())
 
     # Keep the listener alive
     try:

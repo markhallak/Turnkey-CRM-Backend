@@ -121,10 +121,11 @@ CREATE TABLE IF NOT EXISTS "user" (
   client_id  UUID         REFERENCES client(id)    ON UPDATE CASCADE ON DELETE RESTRICT,
   created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  setup_recovery_done BOOLEAN NOT NULL DEFAULT FALSE,
+  has_set_recovery_phrase BOOLEAN NOT NULL DEFAULT FALSE,
   onboarding_done BOOLEAN NOT NULL DEFAULT FALSE,
   is_active  BOOLEAN      NOT NULL DEFAULT TRUE,
   is_client  BOOLEAN      NOT NULL DEFAULT FALSE,
+  is_blacklisted BOOLEAN NOT NULL DEFAULT FALSE,
   is_deleted BOOLEAN      NOT NULL DEFAULT FALSE,
   deleted_at TIMESTAMPTZ
 );
@@ -306,11 +307,12 @@ MAGIC_LINK = """
 CREATE TABLE IF NOT EXISTS magic_link (
   uuid           UUID        PRIMARY KEY,
   user_id        UUID        REFERENCES "user"(id),
-  sig            VARCHAR(255) NOT NULL,
+  token          TEXT        NOT NULL,
   expires_at     TIMESTAMPTZ NOT NULL,
   consumed       BOOLEAN     NOT NULL DEFAULT FALSE,
   purpose        VARCHAR(32) NOT NULL,
-  send_to         VARCHAR(255) NOT NULL
+  is_sent        BOOLEAN     NOT NULL DEFAULT FALSE,
+  send_to        VARCHAR(255) NOT NULL
 );
 """
 
@@ -332,11 +334,11 @@ CREATE TRIGGER trg_new_magic_link_row
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 10: PASSWORD
+# 10: CLIENT_PASSWORD
 # ──────────────────────────────────────────────────────────────────────────────
 
-PASSWORD = """
-CREATE TABLE IF NOT EXISTS password (
+CLIENT_PASSWORD = """
+CREATE TABLE IF NOT EXISTS client_password (
   user_id               UUID        PRIMARY KEY
     REFERENCES "user"(id) ON DELETE CASCADE,
   client_id             UUID        NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE CASCADE,
@@ -357,6 +359,15 @@ CREATE TABLE IF NOT EXISTS user_key (
   public_key BYTEA NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (user_id, purpose)
+);
+"""
+
+JWT_TOKEN = """
+CREATE TABLE IF NOT EXISTS jwt_token (
+  jti UUID PRIMARY KEY,
+  user_email VARCHAR(255) NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  revoked BOOLEAN NOT NULL DEFAULT FALSE
 );
 """
 
@@ -897,8 +908,9 @@ async def create_tables():
             ("message_mention", MESSAGE_MENTION),
             ("magic_link", MAGIC_LINK),
             ("magic_link_listen_notify", MAGIC_LINK_LISTEN_NOTIFY),
-            ("password", PASSWORD),
+            ("client_password", CLIENT_PASSWORD),
             ("user_key", USER_KEY),
+            ("jwt_token", JWT_TOKEN),
             ("insurance", INSURANCE),
             ("notification", NOTIFICATION),
             ("notification_listen_notify", NOTIFICATION_LISTEN_NOTIFY),
@@ -923,7 +935,7 @@ async def create_tables():
                   is_active,
                   is_client
                 ) VALUES (
-                  'markhallak@outlook.com',
+                  'test@gmail.com',
                   'Mark',
                   'Hallak',
                   '#FF0000',
@@ -957,7 +969,7 @@ async def create_tables():
                     ("p", "client_technician", "*", "/projects/view/*", "read_without_financial"),
                     ("p", "client_technician", "*", "/get-messages", "*"),
 
-                    ("g", "markhallak@outlook.com", "employee_admin", "*", "")
+                    ("g", "test@gmail.com", "employee_admin", "*", "")
                 ]
             )
 
