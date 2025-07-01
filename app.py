@@ -26,7 +26,7 @@ from sqlalchemy import Table, Column, Integer, String, MetaData
 
 from CasbinAdapter import CasbinAdapter
 from constants import ASYNCPG_URL, SECRET_KEY, REDIS_URL, KMS_URL
-from util import isUUIDv4, createMagicLink, generateJwtRs256
+from util import isUUIDv4, createMagicLink, generateJwtRs256, decodeJwtRs256
 
 
 class SimpleUser:
@@ -256,12 +256,35 @@ async def getPublicKeyEndpoint(request: Request):
 
 @app.get("/auth/ed25519-public-key")
 async def getEd25519PublicKey(request: Request):
-    pubkey = request.app.state.ed25519PublicKey  # an Ed25519 key object
-    pem: bytes = pubkey.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    return {"public_key": request.app.state.ed25519PublicKey}
+
+
+@app.get("/auth/validate-magic-link")
+async def validateMagicLink(token: str, request: Request, conn: Connection = Depends(get_conn)):
+    try:
+        payload = decodeJwtRs256(token, request.app.state.publicKey)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid")
+
+    uuid_str = payload.get("uuid")
+    if not uuid_str or not await isUUIDv4(uuid_str):
+        raise HTTPException(status_code=400, detail="invalid")
+
+    row = await conn.fetchrow(
+        "SELECT consumed, expires_at FROM magic_link WHERE uuid=$1",
+        UUID(uuid_str),
     )
-    return {"public_key": pem.decode()}
+    if (
+        not row
+        or row["consumed"]
+        or row["expires_at"] < datetime.now(timezone.utc)
+    ):
+        raise HTTPException(status_code=400, detail="invalid")
+
+    return {
+        "userId": payload.get("userId"),
+        "username": payload.get("username"),
+    }
 
 
 async def uploadDocument(fileBlob: bytes) -> dict:
@@ -2303,8 +2326,26 @@ async def login(request: Request, payload: dict = Body(), conn: Connection = Dep
 
 @app.post("/auth/set-recovery-phrase")
 async def setRecoveryPhrase(payload: dict = Body(), request: Request = None,
-                            conn: Connection = Depends(get_conn),
-                            enforcer: SyncedEnforcer = Depends(getEnforcer)):
+                            conn: Connection = Depends(get_conn)):
+    token_str = payload.get("token")
+    if not token_str:
+        raise HTTPException(status_code=400, detail="missing token")
+    try:
+        token_payload = decodeJwtRs256(token_str, request.app.state.publicKey)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid token")
+
+    link_uuid = token_payload.get("uuid")
+    if not link_uuid or not await isUUIDv4(link_uuid):
+        raise HTTPException(status_code=400, detail="invalid token")
+
+    row = await conn.fetchrow(
+        "SELECT consumed, expires_at FROM magic_link WHERE uuid=$1",
+        UUID(link_uuid),
+    )
+    if not row or row["consumed"] or row["expires_at"] < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="invalid token")
+
     # When called with encrypted data, finalize recovery setup
     if "clientPubKey" in payload:
         client_pub_b64 = payload.get("clientPubKey")
@@ -2321,7 +2362,9 @@ async def setRecoveryPhrase(payload: dict = Body(), request: Request = None,
             raise HTTPException(status_code=400, detail="Bad encoding")
 
         server_ed_priv = base64.b64decode(request.app.state.ed25519PrivateKey)
-        server_x_priv = nacl.bindings.crypto_sign_ed25519_sk_to_curve25519(server_ed_priv)
+        server_ed_pub = base64.b64decode(request.app.state.ed25519PublicKey)
+        ed_secret = server_ed_priv + server_ed_pub
+        server_x_priv = nacl.bindings.crypto_sign_ed25519_sk_to_curve25519(ed_secret)
         client_x_pub = nacl.bindings.crypto_sign_ed25519_pk_to_curve25519(client_pub)
         shared = nacl.bindings.crypto_scalarmult(server_x_priv, client_x_pub)
 
@@ -2337,33 +2380,33 @@ async def setRecoveryPhrase(payload: dict = Body(), request: Request = None,
             raise HTTPException(status_code=400, detail="Invalid data")
 
         user_id = j.get("userId")
-        recovery_phrase = j.get("recoveryPhrase")
+        digest_b64 = j.get("digest")
         salt_b64 = j.get("salt")
         params_b64 = j.get("kdfParams")
         if not user_id or not await isUUIDv4(user_id):
             raise HTTPException(status_code=400, detail="Invalid userId")
+        if not digest_b64:
+            raise HTTPException(status_code=400, detail="Missing digest")
 
         salt = base64.b64decode(salt_b64)
         params = json.loads(base64.b64decode(params_b64).decode())
-        digest = hash_secret_raw(
-            recovery_phrase.encode(),
-            salt,
-            time_cost=params.get("time", 2),
-            memory_cost=params.get("mem", 19 * 1024),
-            parallelism=params.get("parallelism", 1),
-            hash_len=params.get("hashLen", 32),
-            type=Type.ID,
-        )
+        digest = base64.b64decode(digest_b64)
 
         await conn.execute(
-            "INSERT INTO client_password (user_id, client_id, encrypted_password, iv, salt, kdf_params) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (user_id) DO UPDATE SET encrypted_password=EXCLUDED.encrypted_password, iv=EXCLUDED.iv, salt=EXCLUDED.salt, kdf_params=EXCLUDED.kdf_params",
+            """
+            INSERT INTO user_recovery_params (user_id, iv, salt, kdf_params, digest)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (user_id)
+            DO UPDATE SET iv=EXCLUDED.iv, salt=EXCLUDED.salt,
+              kdf_params=EXCLUDED.kdf_params, digest=EXCLUDED.digest, updated_at=now()
+            """,
             user_id,
-            UUID('00000000-0000-0000-0000-000000000000'),
-            digest,
             nonce,
             salt,
             json.dumps(params),
+            digest,
         )
+
 
         await conn.execute(
             "INSERT INTO user_key (user_id, purpose, public_key) VALUES ($1,'sig',$2) ON CONFLICT (user_id, purpose) DO UPDATE SET public_key=EXCLUDED.public_key",
@@ -2389,6 +2432,7 @@ async def setRecoveryPhrase(payload: dict = Body(), request: Request = None,
         redis = request.app.state.redis
         await redis.sadd("active_jtis", jti)
         await redis.publish("jwt_updates", f"add:{jti}")
+        await conn.execute("UPDATE magic_link SET consumed=TRUE WHERE uuid=$1", UUID(link_uuid))
         next_payload = {
             "next_step": "/onboarding",
             "exp": int((datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp()),
@@ -2401,10 +2445,15 @@ async def setRecoveryPhrase(payload: dict = Body(), request: Request = None,
 
 
 
-@app.get("/auth/recovery-params")
+@app.get("/auth/get-recovery-params")
 async def getRecoveryParams(email: str, conn: Connection = Depends(get_conn)):
     row = await conn.fetchrow(
-        "SELECT u.id, p.salt, p.kdf_params FROM client_password p JOIN \"user\" u ON p.user_id=u.id WHERE u.email=$1",
+        """
+        SELECT u.id, p.salt, p.kdf_params
+          FROM "user" u
+          JOIN user_recovery_params p ON p.user_id = u.id
+         WHERE u.email=$1 AND u.is_deleted=FALSE
+        """,
         email,
     )
     if not row:
@@ -2443,8 +2492,20 @@ async def updateClientKey(payload: dict = Body(), request: Request = None,
     except Exception:
         raise HTTPException(status_code=400, detail="Decrypt failed")
     user_id = j.get("userId")
+    digest_b64 = j.get("digest")
     if not user_id or not await isUUIDv4(user_id):
         raise HTTPException(status_code=400, detail="Invalid userId")
+    if not digest_b64:
+        raise HTTPException(status_code=400, detail="Missing digest")
+
+    digest = base64.b64decode(digest_b64)
+
+    row = await conn.fetchrow(
+        "SELECT digest FROM user_recovery_params WHERE user_id=$1",
+        user_id,
+    )
+    if not row or row["digest"] != digest:
+        raise HTTPException(status_code=403, detail="Invalid recovery phrase")
 
     await conn.execute(
         "INSERT INTO user_key (user_id, purpose, public_key) VALUES ($1,'sig',$2) ON CONFLICT (user_id, purpose) DO UPDATE SET public_key=EXCLUDED.public_key",
