@@ -97,6 +97,46 @@ async def verifySession(request: Request):
     return sub
 
 
+def decryptPayload(includePublic: bool = False):
+    async def _dep(payload: dict = Body(), request: Request = None):
+        if "clientPubKey" not in payload:
+            return payload
+        client_pub_b64 = payload.get("clientPubKey")
+        nonce_b64 = payload.get("nonce")
+        ct_b64 = payload.get("ciphertext")
+        if not client_pub_b64 or not nonce_b64 or not ct_b64:
+            raise HTTPException(status_code=400, detail="Invalid payload")
+        try:
+            client_pub = base64.b64decode(client_pub_b64)
+            nonce = base64.b64decode(nonce_b64)
+            cipher = base64.b64decode(ct_b64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Bad encoding")
+        server_ed_priv = base64.b64decode(request.app.state.ed25519PrivateKey)
+        if includePublic:
+            server_ed_pub = base64.b64decode(request.app.state.ed25519PublicKey)
+            ed_secret = server_ed_priv + server_ed_pub
+            server_x_priv = nacl.bindings.crypto_sign_ed25519_sk_to_curve25519(ed_secret)
+        else:
+            server_x_priv = nacl.bindings.crypto_sign_ed25519_sk_to_curve25519(server_ed_priv)
+        client_x_pub = nacl.bindings.crypto_sign_ed25519_pk_to_curve25519(client_pub)
+        shared = nacl.bindings.crypto_scalarmult(server_x_priv, client_x_pub)
+        aesgcm = AESGCM(shared)
+        try:
+            data = aesgcm.decrypt(nonce, cipher, None)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Decrypt failed")
+        try:
+            obj = json.loads(data.decode())
+            obj["_client_pub"] = client_pub
+            obj["_nonce"] = nonce
+            return obj
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid data")
+
+    return _dep
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # startup logic
@@ -2262,36 +2302,9 @@ async def updateUser(payload: dict = Body(), conn: Connection = Depends(get_conn
 
 
 @app.post("/auth/login")
-async def login(request: Request, payload: dict = Body(), conn: Connection = Depends(get_conn),
+async def login(request: Request, data: dict = Depends(decryptPayload()), conn: Connection = Depends(get_conn),
                 enforcer: SyncedEnforcer = Depends(getEnforcer)):
-    if "clientPubKey" in payload:
-        client_pub_b64 = payload.get("clientPubKey")
-        nonce_b64 = payload.get("nonce")
-        ct_b64 = payload.get("ciphertext")
-        if not client_pub_b64 or not nonce_b64 or not ct_b64:
-            raise HTTPException(status_code=400, detail="Invalid payload")
-        try:
-            client_pub = base64.b64decode(client_pub_b64)
-            nonce = base64.b64decode(nonce_b64)
-            cipher = base64.b64decode(ct_b64)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Bad encoding")
-        server_ed_priv = base64.b64decode(request.app.state.ed25519PrivateKey)
-        server_x_priv = nacl.bindings.crypto_sign_ed25519_sk_to_curve25519(server_ed_priv)
-        client_x_pub = nacl.bindings.crypto_sign_ed25519_pk_to_curve25519(client_pub)
-        shared = nacl.bindings.crypto_scalarmult(server_x_priv, client_x_pub)
-        aesgcm = AESGCM(shared)
-        try:
-            data = aesgcm.decrypt(nonce, cipher, None)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Decrypt failed")
-        try:
-            j = json.loads(data.decode())
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid data")
-        email = j.get("email")
-    else:
-        email = payload.get("email")
+    email = data.get("email")
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
     row = await conn.fetchrow(
@@ -2325,9 +2338,9 @@ async def login(request: Request, payload: dict = Body(), conn: Connection = Dep
 
 
 @app.post("/auth/set-recovery-phrase")
-async def setRecoveryPhrase(payload: dict = Body(), request: Request = None,
+async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayload(True)),
                             conn: Connection = Depends(get_conn)):
-    token_str = payload.get("token")
+    token_str = data.get("token")
     if not token_str:
         raise HTTPException(status_code=400, detail="missing token")
     try:
@@ -2347,42 +2360,13 @@ async def setRecoveryPhrase(payload: dict = Body(), request: Request = None,
         raise HTTPException(status_code=400, detail="invalid token")
 
     # When called with encrypted data, finalize recovery setup
-    if "clientPubKey" in payload:
-        client_pub_b64 = payload.get("clientPubKey")
-        nonce_b64 = payload.get("nonce")
-        ct_b64 = payload.get("ciphertext")
-        if not client_pub_b64 or not nonce_b64 or not ct_b64:
-            raise HTTPException(status_code=400, detail="Invalid payload")
-
-        try:
-            client_pub = base64.b64decode(client_pub_b64)
-            nonce = base64.b64decode(nonce_b64)
-            cipher = base64.b64decode(ct_b64)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Bad encoding")
-
-        server_ed_priv = base64.b64decode(request.app.state.ed25519PrivateKey)
-        server_ed_pub = base64.b64decode(request.app.state.ed25519PublicKey)
-        ed_secret = server_ed_priv + server_ed_pub
-        server_x_priv = nacl.bindings.crypto_sign_ed25519_sk_to_curve25519(ed_secret)
-        client_x_pub = nacl.bindings.crypto_sign_ed25519_pk_to_curve25519(client_pub)
-        shared = nacl.bindings.crypto_scalarmult(server_x_priv, client_x_pub)
-
-        aesgcm = AESGCM(shared)
-        try:
-            data = aesgcm.decrypt(nonce, cipher, None)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Decrypt failed")
-
-        try:
-            j = json.loads(data.decode())
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid data")
-
-        user_id = j.get("userId")
-        digest_b64 = j.get("digest")
-        salt_b64 = j.get("salt")
-        params_b64 = j.get("kdfParams")
+    user_id = data.get("userId")
+    if user_id:
+        digest_b64 = data.get("digest")
+        salt_b64 = data.get("salt")
+        params_b64 = data.get("kdfParams")
+        nonce = data.get("_nonce")
+        client_pub = data.get("_client_pub")
         if not user_id or not await isUUIDv4(user_id):
             raise HTTPException(status_code=400, detail="Invalid userId")
         if not digest_b64:
@@ -2466,33 +2450,12 @@ async def getRecoveryParams(email: str, conn: Connection = Depends(get_conn)):
 
 
 @app.post("/auth/update-client-key")
-async def updateClientKey(payload: dict = Body(), request: Request = None,
+async def updateClientKey(request: Request, data: dict = Depends(decryptPayload()),
                           conn: Connection = Depends(get_conn)):
-    client_pub_b64 = payload.get("clientPubKey")
-    nonce_b64 = payload.get("nonce")
-    ct_b64 = payload.get("ciphertext")
-    if not client_pub_b64 or not nonce_b64 or not ct_b64:
-        raise HTTPException(status_code=400, detail="Invalid payload")
-    try:
-        client_pub = base64.b64decode(client_pub_b64)
-        nonce = base64.b64decode(nonce_b64)
-        cipher = base64.b64decode(ct_b64)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Bad encoding")
-
-    server_ed_priv = base64.b64decode(request.app.state.ed25519PrivateKey)
-    server_x_priv = nacl.bindings.crypto_sign_ed25519_sk_to_curve25519(server_ed_priv)
-    client_x_pub = nacl.bindings.crypto_sign_ed25519_pk_to_curve25519(client_pub)
-    shared = nacl.bindings.crypto_scalarmult(server_x_priv, client_x_pub)
-
-    aesgcm = AESGCM(shared)
-    try:
-        data = aesgcm.decrypt(nonce, cipher, None)
-        j = json.loads(data.decode())
-    except Exception:
-        raise HTTPException(status_code=400, detail="Decrypt failed")
-    user_id = j.get("userId")
-    digest_b64 = j.get("digest")
+    client_pub = data.get("_client_pub")
+    nonce = data.get("_nonce")
+    user_id = data.get("userId")
+    digest_b64 = data.get("digest")
     if not user_id or not await isUUIDv4(user_id):
         raise HTTPException(status_code=400, detail="Invalid userId")
     if not digest_b64:

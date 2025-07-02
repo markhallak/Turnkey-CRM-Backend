@@ -131,7 +131,6 @@ CREATE TABLE IF NOT EXISTS "user" (
 );
 """
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # 4: PROJECT
 # ──────────────────────────────────────────────────────────────────────────────
@@ -961,7 +960,6 @@ async def create_tables():
                 """
             )
 
-
             await conn.executemany(
                 """
                 INSERT INTO casbin_rule (ptype, subject, domain, object, action)
@@ -1008,11 +1006,5 @@ def print_usage():
 
 
 if __name__ == "__main__":
-    cmd = sys.argv[1].lower() if len(sys.argv) == 2 else input("reset or create? ").strip().lower()
-    if cmd == "reset":
-        asyncio.run(reset_schema())
-    elif cmd == "create":
-        asyncio.run(create_tables())
-    else:
-        print_usage()
-        sys.exit(1)
+    asyncio.run(reset_schema())
+    asyncio.run(create_tables())
