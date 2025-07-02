@@ -58,7 +58,7 @@ def getEnforcer(request: Request) -> SyncedEnforcer:
 async def authorize(request: Request, user: SimpleUser = Depends(getCurrentUser),
                     enforcer: SyncedEnforcer = Depends(getEnforcer)):
     path = request.url.path
-    #
+
     # if not user.setup_done and not path.startswith("/auth") and path != "/set-recovery-phrase":
     #     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Finish setup recovery")
     # if user.setup_done and not user.onboarding_done and not path.startswith("/auth") and path != "/onboarding":
@@ -101,36 +101,33 @@ def decryptPayload(includePublic: bool = False):
     async def _dep(payload: dict = Body(), request: Request = None):
         if "clientPubKey" not in payload:
             return payload
-        client_pub_b64 = payload.get("clientPubKey")
-        nonce_b64 = payload.get("nonce")
-        ct_b64 = payload.get("ciphertext")
-        if not client_pub_b64 or not nonce_b64 or not ct_b64:
+        clientPublicKeyB64 = payload.get("clientPubKey")
+        ivB64 = payload.get("nonce")
+        ciphertextB64 = payload.get("ciphertext")
+        if not clientPublicKeyB64 or not ivB64 or not ciphertextB64:
             raise HTTPException(status_code=400, detail="Invalid payload")
         try:
-            client_pub = base64.b64decode(client_pub_b64)
-            nonce = base64.b64decode(nonce_b64)
-            cipher = base64.b64decode(ct_b64)
+            clientPublicKey = base64.b64decode(clientPublicKeyB64)
+            iv = base64.b64decode(ivB64)
+            ciphertext = base64.b64decode(ciphertextB64)
         except Exception:
             raise HTTPException(status_code=400, detail="Bad encoding")
-        server_ed_priv = base64.b64decode(request.app.state.ed25519PrivateKey)
-        if includePublic:
-            server_ed_pub = base64.b64decode(request.app.state.ed25519PublicKey)
-            ed_secret = server_ed_priv + server_ed_pub
-            server_x_priv = nacl.bindings.crypto_sign_ed25519_sk_to_curve25519(ed_secret)
-        else:
-            server_x_priv = nacl.bindings.crypto_sign_ed25519_sk_to_curve25519(server_ed_priv)
-        client_x_pub = nacl.bindings.crypto_sign_ed25519_pk_to_curve25519(client_pub)
-        shared = nacl.bindings.crypto_scalarmult(server_x_priv, client_x_pub)
-        aesgcm = AESGCM(shared)
+        serverEdPriv = base64.b64decode(request.app.state.ed25519PrivateKey)
+        serverEdPub = base64.b64decode(request.app.state.ed25519PublicKey)
+        serverEdSecret = serverEdPriv + serverEdPub
+        serverCurvePriv = nacl.bindings.crypto_sign_ed25519_sk_to_curve25519(serverEdSecret)
+        clientCurvePub = nacl.bindings.crypto_sign_ed25519_pk_to_curve25519(clientPublicKey)
+        sharedSecret = nacl.bindings.crypto_scalarmult(serverCurvePriv, clientCurvePub)
+        aesGcm = AESGCM(sharedSecret)
         try:
-            data = aesgcm.decrypt(nonce, cipher, None)
+            data = aesGcm.decrypt(iv, ciphertext, None)
         except Exception:
             raise HTTPException(status_code=400, detail="Decrypt failed")
         try:
-            obj = json.loads(data.decode())
-            obj["_client_pub"] = client_pub
-            obj["_nonce"] = nonce
-            return obj
+            payloadObj = json.loads(data.decode())
+            payloadObj["_client_pub"] = clientPublicKey
+            payloadObj["_nonce"] = iv
+            return payloadObj
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid data")
 
@@ -322,8 +319,7 @@ async def validateMagicLink(token: str, request: Request, conn: Connection = Dep
         raise HTTPException(status_code=400, detail="invalid")
 
     return {
-        "userId": payload.get("userId"),
-        "username": payload.get("username"),
+        "userEmail": payload.get("userEmail"),
     }
 
 
@@ -2227,7 +2223,7 @@ async def inviteUser(
         raise HTTPException(status_code=400, detail="Invalid account type")
 
     hex_color = f"#{random.randint(0, 0xFFFFFF):06x}"
-    row = await conn.fetchrow(
+    await conn.fetchrow(
         "INSERT INTO \"user\" (email, first_name, last_name, hex_color, is_active, is_client) "
         "VALUES ($1,$2,$3,$4,FALSE,$5) RETURNING id",
         email_to_invite,
@@ -2236,11 +2232,9 @@ async def inviteUser(
         hex_color,
         account_type.startswith("Client")
     )
-    user_id = row["id"]
 
     await createMagicLink(
         conn,
-        user_id,
         request.app.state.privateKey,
         purpose="signup",
         recipientEmail=email_to_invite,
@@ -2360,15 +2354,15 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
         raise HTTPException(status_code=400, detail="invalid token")
 
     # When called with encrypted data, finalize recovery setup
-    user_id = data.get("userId")
-    if user_id:
+    userEmail = data.get("userEmail")
+    if userEmail:
         digest_b64 = data.get("digest")
         salt_b64 = data.get("salt")
         params_b64 = data.get("kdfParams")
-        nonce = data.get("_nonce")
-        client_pub = data.get("_client_pub")
-        if not user_id or not await isUUIDv4(user_id):
-            raise HTTPException(status_code=400, detail="Invalid userId")
+        iv = data.get("_nonce")
+        clientPub = data.get("_client_pub")
+        if not userEmail:
+            raise HTTPException(status_code=400, detail="Missing user's email")
         if not digest_b64:
             raise HTTPException(status_code=400, detail="Missing digest")
 
@@ -2378,14 +2372,14 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
 
         await conn.execute(
             """
-            INSERT INTO user_recovery_params (user_id, iv, salt, kdf_params, digest)
+            INSERT INTO user_recovery_params (user_email, iv, salt, kdf_params, digest)
             VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (user_id)
+            ON CONFLICT (user_email)
             DO UPDATE SET iv=EXCLUDED.iv, salt=EXCLUDED.salt,
               kdf_params=EXCLUDED.kdf_params, digest=EXCLUDED.digest, updated_at=now()
             """,
-            user_id,
-            nonce,
+            userEmail,
+            iv,
             salt,
             json.dumps(params),
             digest,
@@ -2393,24 +2387,23 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
 
 
         await conn.execute(
-            "INSERT INTO user_key (user_id, purpose, public_key) VALUES ($1,'sig',$2) ON CONFLICT (user_id, purpose) DO UPDATE SET public_key=EXCLUDED.public_key",
-            user_id,
-            client_pub,
+            "INSERT INTO user_key (user_email, purpose, public_key) VALUES ($1,'sig',$2) ON CONFLICT (user_email, purpose) DO UPDATE SET public_key=EXCLUDED.public_key",
+            userEmail,
+            clientPub,
         )
 
         await conn.execute(
-            "UPDATE \"user\" SET is_active=TRUE, has_set_recovery_phrase=TRUE WHERE id=$1",
-            user_id,
+            "UPDATE \"user\" SET is_active=TRUE, has_set_recovery_phrase=TRUE WHERE email=$1",
+            userEmail,
         )
 
-        email_row = await conn.fetchrow('SELECT email FROM "user" WHERE id=$1', user_id)
-        user_email = email_row["email"] if email_row else ""
+
         jti = str(uuid4())
         exp_dt = datetime.now(timezone.utc) + timedelta(minutes=5)
         await conn.execute(
             "INSERT INTO jwt_token (jti, user_email, expires_at, revoked) VALUES ($1,$2,$3,FALSE)",
             jti,
-            user_email,
+            userEmail,
             exp_dt,
         )
         redis = request.app.state.redis
@@ -2422,7 +2415,7 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
             "exp": int((datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp()),
         }
         nav_token = generateJwtRs256(next_payload, request.app.state.privateKey)
-        session_token = jwt.encode({"sub": user_email, "jti": jti, "exp": exp_dt}, SECRET_KEY, algorithm="HS256")
+        session_token = jwt.encode({"sub": userEmail, "jti": jti, "exp": exp_dt}, SECRET_KEY, algorithm="HS256")
         response = JSONResponse({"token": nav_token})
         response.set_cookie("session", session_token, httponly=True, secure=True)
         return response
@@ -2435,7 +2428,7 @@ async def getRecoveryParams(email: str, conn: Connection = Depends(get_conn)):
         """
         SELECT u.id, p.salt, p.kdf_params
           FROM "user" u
-          JOIN user_recovery_params p ON p.user_id = u.id
+          JOIN user_recovery_params p ON p.user_email = u.email
          WHERE u.email=$1 AND u.is_deleted=FALSE
         """,
         email,
@@ -2452,28 +2445,28 @@ async def getRecoveryParams(email: str, conn: Connection = Depends(get_conn)):
 @app.post("/auth/update-client-key")
 async def updateClientKey(request: Request, data: dict = Depends(decryptPayload()),
                           conn: Connection = Depends(get_conn)):
-    client_pub = data.get("_client_pub")
-    nonce = data.get("_nonce")
-    user_id = data.get("userId")
+    clientPub = data.get("_client_pub")
+    iv = data.get("_nonce")
+    userEmail = data.get("userEmail")
     digest_b64 = data.get("digest")
-    if not user_id or not await isUUIDv4(user_id):
-        raise HTTPException(status_code=400, detail="Invalid userId")
+    if not userEmail:
+        raise HTTPException(status_code=400, detail="Missing user's email")
     if not digest_b64:
         raise HTTPException(status_code=400, detail="Missing digest")
 
     digest = base64.b64decode(digest_b64)
 
     row = await conn.fetchrow(
-        "SELECT digest FROM user_recovery_params WHERE user_id=$1",
-        user_id,
+        "SELECT digest FROM user_recovery_params WHERE user_email=$1",
+        userEmail,
     )
     if not row or row["digest"] != digest:
         raise HTTPException(status_code=403, detail="Invalid recovery phrase")
 
     await conn.execute(
-        "INSERT INTO user_key (user_id, purpose, public_key) VALUES ($1,'sig',$2) ON CONFLICT (user_id, purpose) DO UPDATE SET public_key=EXCLUDED.public_key",
-        user_id,
-        client_pub,
+        "INSERT INTO user_key (user_email, purpose, public_key) VALUES ($1,'sig',$2) ON CONFLICT (user_email, purpose) DO UPDATE SET public_key=EXCLUDED.public_key",
+        userEmail,
+        clientPub,
     )
     return {"status": "ok"}
 

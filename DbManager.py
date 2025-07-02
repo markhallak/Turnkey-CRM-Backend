@@ -292,9 +292,9 @@ MESSAGE_MENTION = """
 CREATE TABLE IF NOT EXISTS message_mention (
   id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
   message_id  UUID         NOT NULL REFERENCES message(id) ON DELETE CASCADE,
-  user_id     UUID         NOT NULL REFERENCES "user"(id)    ON DELETE CASCADE,
+  user_email  VARCHAR(255)         NOT NULL REFERENCES "user"(email)    ON DELETE CASCADE,
   created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  UNIQUE(message_id, user_id)
+  UNIQUE(message_id, user_email)
 );
 """
 
@@ -305,7 +305,7 @@ CREATE TABLE IF NOT EXISTS message_mention (
 MAGIC_LINK = """
 CREATE TABLE IF NOT EXISTS magic_link (
   uuid           UUID        PRIMARY KEY,
-  user_id        UUID        REFERENCES "user"(id),
+  user_email     VARCHAR(255)        REFERENCES "user"(email),
   token          TEXT        NOT NULL,
   expires_at     TIMESTAMPTZ NOT NULL,
   consumed       BOOLEAN     NOT NULL DEFAULT FALSE,
@@ -338,8 +338,8 @@ CREATE TRIGGER trg_new_magic_link_row
 
 CLIENT_PASSWORD = """
 CREATE TABLE IF NOT EXISTS client_password (
-  user_id               UUID        PRIMARY KEY
-    REFERENCES "user"(id) ON DELETE CASCADE,
+  user_email               VARCHAR(255)        PRIMARY KEY
+    REFERENCES "user"(email) ON DELETE CASCADE,
   client_id             UUID        NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE CASCADE,
   encrypted_password    BYTEA       NOT NULL,
   iv                    BYTEA       NOT NULL,
@@ -353,8 +353,8 @@ CREATE TABLE IF NOT EXISTS client_password (
 # Parameters used for user recovery phrase KDF
 USER_RECOVERY_PARAMS = """
 CREATE TABLE IF NOT EXISTS user_recovery_params (
-  user_id    UUID        PRIMARY KEY
-    REFERENCES "user"(id) ON DELETE CASCADE,
+  user_email    VARCHAR(255)        PRIMARY KEY
+    REFERENCES "user"(email) ON DELETE CASCADE,
   iv         BYTEA       NOT NULL,
   salt       BYTEA       NOT NULL,
   kdf_params JSONB       NOT NULL,
@@ -367,11 +367,11 @@ CREATE TABLE IF NOT EXISTS user_recovery_params (
 # 11: USER_KEY
 USER_KEY = """
 CREATE TABLE IF NOT EXISTS user_key (
-  user_id  UUID    NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  user_email  VARCHAR(255)    NOT NULL REFERENCES "user"(email) ON DELETE CASCADE,
   purpose  VARCHAR(16) NOT NULL,
   public_key BYTEA NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (user_id, purpose)
+  PRIMARY KEY (user_email, purpose)
 );
 """
 

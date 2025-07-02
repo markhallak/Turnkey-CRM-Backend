@@ -18,7 +18,6 @@ async def isUUIDv4(u: str) -> bool:
 
 async def createMagicLink(
         conn: Connection,
-        user_id: UUID,
         private_key_pem: str,
         purpose: str,
         recipientEmail: str,
@@ -28,23 +27,22 @@ async def createMagicLink(
     expires_at = datetime.now(timezone.utc) + timedelta(hours=ttlHours)
     payload = {
         "uuid": str(new_uuid),
-        "userId": str(user_id),
-        "username": recipientEmail,
-        "next_step": "setup_recovery",
+        "userEmail": recipientEmail,
+        "next_step": "set-recovery-phrase",
         "exp": int(expires_at.timestamp()),
     }
     token = generateJwtRs256(payload, private_key_pem)
 
     sql = """
         INSERT INTO magic_link (
-          uuid, user_id, token, expires_at, consumed, purpose, send_to
+          uuid, user_email, token, expires_at, consumed, purpose, send_to
         ) VALUES ($1, $2, $3, $4, FALSE, $5, $6);
     """
 
     await conn.execute(
         sql,
         new_uuid,
-        user_id,
+        recipientEmail,
         token,
         expires_at,
         purpose,
