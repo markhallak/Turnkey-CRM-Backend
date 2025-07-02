@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import os
 import random
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
@@ -58,13 +59,11 @@ def getEnforcer(request: Request) -> SyncedEnforcer:
 async def authorize(request: Request, user: SimpleUser = Depends(getCurrentUser),
                     enforcer: SyncedEnforcer = Depends(getEnforcer)):
     path = request.url.path
-
-    # if not user.setup_done and not path.startswith("/auth") and path != "/set-recovery-phrase":
-    #     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Finish setup recovery")
-    # if user.setup_done and not user.onboarding_done and not path.startswith("/auth") and path != "/onboarding":
-    #     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Finish onboarding")
-
     if not path.startswith("/auth"):
+        if not user.setup_done and path != "/set-recovery-phrase":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="set-recovery-phrase")
+        if user.setup_done and not user.onboarding_done and path != "/onboarding":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="onboarding")
         sub = str(user.email)
         domain = "*"
         obj = path
@@ -132,6 +131,22 @@ def decryptPayload(includePublic: bool = False):
             raise HTTPException(status_code=400, detail="Invalid data")
 
     return _dep
+
+
+def encryptForClient(data: dict, client_pub: bytes, app: FastAPI) -> dict:
+    server_priv = base64.b64decode(app.state.ed25519PrivateKey)
+    server_pub = base64.b64decode(app.state.ed25519PublicKey)
+    secret = server_priv + server_pub
+    server_curve_priv = nacl.bindings.crypto_sign_ed25519_sk_to_curve25519(secret)
+    client_curve_pub = nacl.bindings.crypto_sign_ed25519_pk_to_curve25519(client_pub)
+    shared = nacl.bindings.crypto_scalarmult(server_curve_priv, client_curve_pub)
+    aes = AESGCM(shared)
+    iv = os.urandom(12)
+    cipher = aes.encrypt(iv, json.dumps(data).encode(), None)
+    return {
+        "nonce": base64.b64encode(iv).decode(),
+        "ciphertext": base64.b64encode(cipher).decode(),
+    }
 
 
 @asynccontextmanager
@@ -421,7 +436,7 @@ async def getNotifications(
 
 @app.get("/get-profile-details")
 async def getProfileDetails(
-        email: UUID = Query(..., description="UUID of the user whose profile to fetch"),
+        email: str = Query(..., description="Email of the user whose profile to fetch"),
         conn: Connection = Depends(get_conn)
 ):
     sql = """
@@ -2416,7 +2431,10 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
         }
         nav_token = generateJwtRs256(next_payload, request.app.state.privateKey)
         session_token = jwt.encode({"sub": userEmail, "jti": jti, "exp": exp_dt}, SECRET_KEY, algorithm="HS256")
-        response = JSONResponse({"token": nav_token})
+        payload = {"token": nav_token}
+        if clientPub is not None:
+            payload = encryptForClient(payload, clientPub, request.app)
+        response = JSONResponse(payload)
         response.set_cookie("session", session_token, httponly=True, secure=True)
         return response
 
