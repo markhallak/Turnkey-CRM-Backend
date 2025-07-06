@@ -3,8 +3,10 @@ import base64
 import json
 import os
 import random
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from typing import Optional
 from uuid import UUID, uuid4
 
@@ -12,11 +14,9 @@ import httpx
 import jwt
 import nacl.bindings
 import uvicorn
-from argon2.low_level import hash_secret_raw, Type
 from asyncpg import create_pool, Pool, Connection
 from casbin import SyncedEnforcer
 from casbin_redis_watcher import new_watcher, WatcherOptions
-from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from databases import Database
 from fastapi import FastAPI, HTTPException, Query, Body, Request, Depends, status
@@ -31,24 +31,47 @@ from util import isUUIDv4, createMagicLink, generateJwtRs256, decodeJwtRs256
 
 
 class SimpleUser:
-    def __init__(self, id: UUID, email: str, setup_done: bool, onboarding_done: bool):
+    def __init__(self, id: UUID, email: str, setup_done: bool, onboarding_done: bool, is_client: bool):
         self.id = id
         self.email = email
         self.setup_done = setup_done
         self.onboarding_done = onboarding_done
+        self.is_client = is_client
 
 
 async def getCurrentUser(request: Request) -> SimpleUser | None:
-    email = request.headers.get("x-user-email", None)
+    token = request.cookies.get("session")
+    if not token:
+        return None
+    try:
+        data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+    except Exception as e:
+        print("EXCEPTION: ", e)
+        return None
 
-    if email:
-        async with request.app.state.db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT id, has_set_recovery_phrase, onboarding_done FROM \"user\" WHERE email=$1",
-                email,
-            )
+    jti = data.get("jti")
+    email = data.get("sub")
+    if not jti or not email:
+        return None
+    redis = request.app.state.redis
+    if not await redis.sismember("active_jtis", jti):
+        return None
+    if await redis.sismember("blacklisted_users", email):
+        return None
+
+    async with request.app.state.db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, has_set_recovery_phrase, onboarding_done, is_client FROM \"user\" WHERE email=$1",
+            email,
+        )
         if row:
-            return SimpleUser(row["id"], email, row["has_set_recovery_phrase"], row["onboarding_done"])
+            return SimpleUser(
+                row["id"],
+                email,
+                row["has_set_recovery_phrase"],
+                row["onboarding_done"],
+                row["is_client"],
+            )
     return None
 
 
@@ -56,14 +79,45 @@ def getEnforcer(request: Request) -> SyncedEnforcer:
     return request.app.state.enforcer
 
 
+BYPASS_SESSION = True
+
+
 async def authorize(request: Request, user: SimpleUser = Depends(getCurrentUser),
                     enforcer: SyncedEnforcer = Depends(getEnforcer)):
     path = request.url.path
-    if not path.startswith("/auth"):
+
+    if (
+            not BYPASS_SESSION
+            and not path.startswith("/auth/ed25519")
+            and not path.startswith("/auth/public-key")
+            and not path.startswith("/auth/login")
+            and not path.startswith("/auth/validate-signup-token")
+            and not path.startswith("/auth/validate-login-token")
+            and not path.startswith("/auth/me")
+            and not path.startswith("/auth/set-recovery-phrase")
+            and not path.startswith("/auth/refresh-session")
+    ):
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthenticated")
+
         if not user.setup_done and path != "/set-recovery-phrase":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="set-recovery-phrase")
+
         if user.setup_done and not user.onboarding_done and path != "/onboarding":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="onboarding")
+            if user.is_client:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="onboarding")
+
+        perms = enforcer.get_policy()  # [[sub, dom, obj, act], …]
+
+        # 2. every “g” (role-mapping) rule it knows
+        groups = enforcer.get_grouping_policy()  # [[sub, role, dom], …]
+
+        # 3. the roles this particular user has in the “*” domain
+        roles = enforcer.get_roles_for_user_in_domain(user.email, "*")
+
+        # 4. all permissions this user already enjoys
+        user_perms = enforcer.get_permissions_for_user(user.email)
+
         sub = str(user.email)
         domain = "*"
         obj = path
@@ -73,27 +127,6 @@ async def authorize(request: Request, user: SimpleUser = Depends(getCurrentUser)
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
 
     return True
-
-
-async def verifySession(request: Request):
-    token = request.cookies.get("session")
-    if not token:
-        raise HTTPException(status_code=401, detail="unauthenticated")
-    try:
-        data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-    except Exception:
-        raise HTTPException(status_code=401, detail="unauthenticated")
-    redis = request.app.state.redis
-    jti = data.get("jti")
-    sub = data.get("sub")
-    if not jti or not sub:
-        raise HTTPException(status_code=401, detail="unauthenticated")
-    if not await redis.sismember("active_jtis", jti):
-        raise HTTPException(status_code=401, detail="revoked")
-    if await redis.sismember("blacklisted_users", sub):
-        raise HTTPException(status_code=403, detail="blacklisted")
-    request.state.user_email = sub
-    return sub
 
 
 def decryptPayload(includePublic: bool = False):
@@ -142,7 +175,13 @@ def encryptForClient(data: dict, client_pub: bytes, app: FastAPI) -> dict:
     shared = nacl.bindings.crypto_scalarmult(server_curve_priv, client_curve_pub)
     aes = AESGCM(shared)
     iv = os.urandom(12)
-    cipher = aes.encrypt(iv, json.dumps(data).encode(), None)
+
+    def defaultEncoder(o):
+        if isinstance(o, Decimal):
+            return float(o)
+        raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+
+    cipher = aes.encrypt(iv, json.dumps(data, default=defaultEncoder).encode(), None)
     return {
         "nonce": base64.b64encode(iv).decode(),
         "ciphertext": base64.b64encode(cipher).decode(),
@@ -178,7 +217,7 @@ async def lifespan(app: FastAPI):
 
     await adapter.load_policy(enforcer.get_model())
     enforcer.build_role_links()
-
+    app.state.casbin_watcher = watcher
     app.state.enforcer = enforcer
 
     loop = asyncio.get_running_loop()
@@ -192,10 +231,10 @@ async def lifespan(app: FastAPI):
     async with app.state.db_pool.acquire() as c:
         rows = await c.fetch("SELECT jti FROM jwt_token WHERE revoked=FALSE AND expires_at>NOW()")
         if rows:
-            await redis.sadd("active_jtis", *[r["jti"] for r in rows])
+            await redis.sadd("active_jtis", *[str(r["jti"]) for r in rows])
         rows = await c.fetch("SELECT email FROM \"user\" WHERE is_blacklisted=TRUE")
         if rows:
-            await redis.sadd("blacklisted_users", *[r["email"] for r in rows])
+            await redis.sadd("blacklisted_users", *[str(r["email"]) for r in rows])
 
     async def listen_jwt():
         pub = redis.pubsub()
@@ -247,10 +286,10 @@ async def lifespan(app: FastAPI):
                 edPriv = await c.get(f"{KMS_URL}/ed25519-private-key")
                 edPub = await c.get(f"{KMS_URL}/ed25519-public-key")
             if (
-                priv.json()["privateKey"] != app.state.privateKey or
-                pub.json()["publicKey"] != app.state.publicKey or
-                edPriv.json()["privateKey"] != app.state.ed25519PrivateKey or
-                edPub.json()["publicKey"] != app.state.ed25519PublicKey
+                    priv.json()["privateKey"] != app.state.privateKey or
+                    pub.json()["publicKey"] != app.state.publicKey or
+                    edPriv.json()["privateKey"] != app.state.ed25519PrivateKey or
+                    edPub.json()["publicKey"] != app.state.ed25519PublicKey
             ):
                 app.state.privateKey = priv.json()["privateKey"]
                 app.state.publicKey = pub.json()["publicKey"]
@@ -276,7 +315,6 @@ async def lifespan(app: FastAPI):
         print("DB pool closed")
 
 
-
 app = FastAPI(lifespan=lifespan, dependencies=[Depends(authorize)])
 origins = [
     "http://localhost:3000",
@@ -285,11 +323,12 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,            # <-- your React app origin
-    allow_credentials=True,           # <-- if you send cookies or Authorization headers
-    allow_methods=["*"],              # <-- GET, POST, PUT, DELETE, OPTIONS, etc
-    allow_headers=["*"],              # <-- allow all request headers
+    allow_origins=origins,  # <-- your React app origin
+    allow_credentials=True,  # <-- if you send cookies or Authorization headers
+    allow_methods=["*"],  # <-- GET, POST, PUT, DELETE, OPTIONS, etc
+    allow_headers=["*"],  # <-- allow all request headers
 )
+
 
 def get_db_pool(request: Request) -> Pool:
     return request.app.state.db_pool
@@ -300,42 +339,119 @@ async def get_conn(db_pool: Pool = Depends(get_db_pool)):
         yield conn
 
 
-
-@app.get("/auth/public-key")
+@app.post("/auth/public-key")
 async def getPublicKeyEndpoint(request: Request):
     return {"public_key": request.app.state.publicKey}
 
 
-@app.get("/auth/ed25519-public-key")
+@app.post("/auth/ed25519-public-key")
 async def getEd25519PublicKey(request: Request):
     return {"public_key": request.app.state.ed25519PublicKey}
 
 
-@app.get("/auth/validate-magic-link")
-async def validateMagicLink(token: str, request: Request, conn: Connection = Depends(get_conn)):
+@app.get("/auth/me")
+async def whoami(user: SimpleUser = Depends(getCurrentUser)):
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="unauthenticated",
+        )
+
+    return {
+        "email": user.email,
+        "setup_done": user.setup_done,
+        "onboarding_done": user.onboarding_done,
+        "is_client": user.is_client
+    }
+
+
+@app.post("/auth/validate-signup-token")
+async def validateSignupToken(request: Request, data: dict = Depends(decryptPayload()),
+                              conn: Connection = Depends(get_conn)):
+    token = data.get("token")
+
     try:
         payload = decodeJwtRs256(token, request.app.state.publicKey)
     except Exception:
-        raise HTTPException(status_code=400, detail="invalid")
+        raise HTTPException(status_code=400, detail="invalid token")
 
     uuid_str = payload.get("uuid")
     if not uuid_str or not await isUUIDv4(uuid_str):
-        raise HTTPException(status_code=400, detail="invalid")
+        raise HTTPException(status_code=400, detail="invalid token uuid")
 
     row = await conn.fetchrow(
         "SELECT consumed, expires_at FROM magic_link WHERE uuid=$1",
         UUID(uuid_str),
     )
     if (
-        not row
-        or row["consumed"]
-        or row["expires_at"] < datetime.now(timezone.utc)
+            not row
+            or row["consumed"]
+            or row["expires_at"] < datetime.now(timezone.utc)
     ):
-        raise HTTPException(status_code=400, detail="invalid")
+        raise HTTPException(status_code=400, detail="invalid sql data")
 
     return {
         "userEmail": payload.get("userEmail"),
     }
+
+
+@app.post("/auth/validate-login-token")
+async def validateLoginToken(
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        enforcer: SyncedEnforcer = Depends(getEnforcer),
+):
+    token_str = data.get("token")
+    try:
+        payload = decodeJwtRs256(token_str, request.app.state.publicKey)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid token")
+
+    link_uuid = payload.get("uuid")
+    if not link_uuid or not await isUUIDv4(link_uuid):
+        raise HTTPException(status_code=400, detail="invalid token")
+
+    row = await conn.fetchrow(
+        "SELECT consumed, expires_at, user_email FROM magic_link WHERE uuid=$1",
+        UUID(link_uuid),
+    )
+    if not row or row["consumed"] or row["expires_at"] < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="invalid token")
+
+    userEmail = row["user_email"]
+    jti = str(uuid4())
+    exp_dt = datetime.now(timezone.utc) + timedelta(minutes=5)
+    await conn.execute(
+        "INSERT INTO jwt_token (jti, user_email, expires_at, revoked) VALUES ($1,$2,$3,FALSE)",
+        jti,
+        userEmail,
+        exp_dt,
+    )
+    redis = request.app.state.redis
+    await redis.sadd("active_jtis", jti)
+    await redis.publish("jwt_updates", f"add:{jti}")
+    await conn.execute("UPDATE magic_link SET consumed=TRUE WHERE uuid=$1", UUID(link_uuid))
+
+    next_payload = {
+        "next_step": "/dashboard",
+        "exp": int((datetime.now(timezone.utc) + timedelta(minutes=(60 * 60 * 72))).timestamp()),
+    }
+    nav_token = generateJwtRs256(next_payload, request.app.state.privateKey)
+    session_token = jwt.encode({"sub": userEmail, "jti": jti, "exp": exp_dt}, SECRET_KEY, algorithm="HS256")
+    response = JSONResponse({"token": nav_token})
+    response.set_cookie(
+        "session",
+        session_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        domain="localhost",
+        path="/",
+        max_age=60 * 30,
+    )
+
+    return response
 
 
 async def uploadDocument(fileBlob: bytes) -> dict:
@@ -352,7 +468,7 @@ async def uploadDocument(fileBlob: bytes) -> dict:
 # TODO:                           HEADER ENDPOINTS                             #
 ################################################################################
 
-@app.get("/global-search")
+@app.post("/global-search")
 async def globalSearch(
         q: str = Query(..., description="Search query string"),
         conn: Connection = Depends(get_conn)
@@ -374,20 +490,16 @@ async def globalSearch(
     return {"results": [dict(r) for r in results]}
 
 
-@app.get("/get-notifications")
+@app.post("/get-notifications")
 async def getNotifications(
-        size: int = Query(..., gt=0, description="Number of notifications per page"),
-        last_seen_created_at: Optional[str] = Query(
-            None,
-            description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
-        ),
-        last_seen_id: Optional[UUID] = Query(
-            None,
-            description="UUID cursor to break ties if multiple notifications share the same timestamp"
-        ),
+        request: Request,
+        data: dict = Depends(decryptPayload()),
         conn: Connection = Depends(get_conn)
 ):
-    # parse or default to now
+    last_seen_created_at = data.get("last_seen_created_at")
+    last_seen_id = data.get("last_seen_id")
+    size = data.get("size", 10)
+
     if last_seen_created_at:
         try:
             dt = datetime.fromisoformat(last_seen_created_at)
@@ -425,20 +537,30 @@ async def getNotifications(
         next_ts = None
         next_id = None
 
-    return {
+    payload = {
         "notifications": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
     }
+    client_pub = data.get("_client_pub")
+    if client_pub is not None:
+        payload = encryptForClient(payload, client_pub, request.app)
+    return payload
 
 
-@app.get("/get-profile-details")
+@app.post("/get-profile-details")
 async def getProfileDetails(
-        email: str = Query(..., description="Email of the user whose profile to fetch"),
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        user: SimpleUser = Depends(getCurrentUser),
         conn: Connection = Depends(get_conn)
 ):
+    email = user.email if user else None
+    if not email:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthenticated")
+
     sql = """
             SELECT first_name, hex_color
             FROM "user"
@@ -451,13 +573,17 @@ async def getProfileDetails(
     if not row:
         raise HTTPException(status_code=404, detail=f"User {email} not found")
 
-    return {
+    payload = {
         "first_name": row["first_name"],
         "hex_color": row["hex_color"],
     }
+    client_pub = data.get("_client_pub")
+    if client_pub is not None:
+        payload = encryptForClient(payload, client_pub, request.app)
+    return payload
 
 
-@app.get("/project-assessments/{project_id}")
+@app.post("/project-assessments/{project_id}")
 async def getProjectAssessments(project_id: str, db_pool: Pool = Depends(get_db_pool)):
     if not await isUUIDv4(project_id):
         raise HTTPException(status_code=400, detail="Invalid project id")
@@ -485,27 +611,35 @@ async def getProjectAssessments(project_id: str, db_pool: Pool = Depends(get_db_
 # TODO:                         DASHBOARD ENDPOINTS                            #
 ################################################################################
 
-@app.get("/get-dashboard-metrics")
-async def getDashboardMetrics(conn: Connection = Depends(get_conn)):
+@app.post("/get-dashboard-metrics")
+async def getDashboardMetrics(
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn)):
     sql = "SELECT * FROM overall_aggregates;"
 
     try:
         rows = await conn.fetch(sql)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"metrics": [dict(r) for r in rows]}
+    payload = {"metrics": [dict(r) for r in rows]}
+    client_pub = data.get("_client_pub")
+    if client_pub is not None:
+        payload = encryptForClient(payload, client_pub, request.app)
+    return payload
 
 
-@app.get("/get-calendar-events")
+@app.post("/get-calendar-events")
 async def getCalendarEvents(
-        month: int = Query(
-            ...,
-            ge=1,
-            le=12,
-            description="Month index (1–12) to fetch calendar events for"
-        ),
+        request: Request,
+        data: dict = Depends(decryptPayload()),
         conn: Connection = Depends(get_conn)
 ):
+    month = data["month"]
+
+    if month < 1 or month > 12:
+        raise Exception()
+
     sql = """
         SELECT
           p.*,
@@ -534,7 +668,11 @@ async def getCalendarEvents(
         d["event_date"] = d["event_date"].isoformat()
         events.append(d)
 
-    return {"events": events}
+    payload = {"events": events}
+    client_pub = data.get("_client_pub")
+    if client_pub is not None:
+        payload = encryptForClient(payload, client_pub, request.app)
+    return payload
 
 
 ################################################################################
@@ -542,7 +680,7 @@ async def getCalendarEvents(
 ################################################################################
 
 
-@app.get("/get-projects")
+@app.post("/get-projects")
 async def getProjects(
         size: int = Query(..., gt=0, description="Number of projects per page"),
         last_seen_created_at: Optional[str] = Query(
@@ -614,7 +752,7 @@ async def getProjects(
     }
 
 
-@app.get("/get-project-statuses")
+@app.post("/get-project-statuses")
 async def getProjectStatuses(conn: Connection = Depends(get_conn)):
     sql = """
             SELECT id, value, color
@@ -631,7 +769,7 @@ async def getProjectStatuses(conn: Connection = Depends(get_conn)):
     return {"project_statuses": [dict(r) for r in rows]}
 
 
-@app.get("/get-project-types")
+@app.post("/get-project-types")
 async def getProjectTypes(conn: Connection = Depends(get_conn)):
     sql = """
             SELECT id, value
@@ -647,7 +785,7 @@ async def getProjectTypes(conn: Connection = Depends(get_conn)):
     return {"project_types": [dict(r) for r in rows]}
 
 
-@app.get("/get-project-trades")
+@app.post("/get-project-trades")
 async def getProjectTrades(conn: Connection = Depends(get_conn)):
     sql = """
             SELECT id, value
@@ -663,7 +801,7 @@ async def getProjectTrades(conn: Connection = Depends(get_conn)):
     return {"project_trades": [dict(r) for r in rows]}
 
 
-@app.get("/get-project-priorities")
+@app.post("/get-project-priorities")
 async def getProjectPriorities(conn: Connection = Depends(get_conn)):
     sql = """
             SELECT id, value, color
@@ -761,7 +899,7 @@ async def createNewProject(
 ################################################################################
 # TODO:                        PROJECT VIEW ENDPOINTS                          #
 ################################################################################
-@app.get("/fetch-project")
+@app.post("/fetch-project")
 async def fetchProject(
         project_id: str = Query(..., description="Project UUID"),
         conn: Connection = Depends(get_conn)
@@ -869,7 +1007,7 @@ async def fetchProject(
     return {"project": dict(row)}
 
 
-@app.get("/get-messages")
+@app.post("/get-messages")
 async def getMessages(
         projectId: str = Query(..., description="Project UUID"),
         size: int = Query(..., gt=0, description="Number of messages to return"),
@@ -952,7 +1090,7 @@ async def getMessages(
     }
 
 
-@app.get("/fetch-project-quotes")
+@app.post("/fetch-project-quotes")
 async def fetchProjectQuotesEndpoint(
         project_id: str = Query(..., description="Project UUID"),
         size: int = Query(..., gt=0, description="Number of quotes to return"),
@@ -1034,7 +1172,7 @@ async def fetchProjectQuotesEndpoint(
     }
 
 
-@app.get("/fetch-project-documents")
+@app.post("/fetch-project-documents")
 async def fetchProjectDocumentsEndpoint(
         project_id: str = Query(..., description="Project UUID"),
         size: int = Query(..., gt=0, description="Number of documents to return"),
@@ -1116,7 +1254,7 @@ async def fetchProjectDocumentsEndpoint(
 # TODO:                         CLIENTS PAGE ENDPOINTS                         #
 ################################################################################
 
-@app.get("/get-clients")
+@app.post("/get-clients")
 async def getClients(
         size: int = Query(..., gt=0, description="Number of clients per page"),
         last_seen_created_at: Optional[str] = Query(
@@ -1193,7 +1331,7 @@ async def getClients(
     }
 
 
-@app.get("/get-client-types")
+@app.post("/get-client-types")
 async def getClientTypes(conn: Connection = Depends(get_conn)):
     sql = """
             SELECT id, value
@@ -1209,7 +1347,7 @@ async def getClientTypes(conn: Connection = Depends(get_conn)):
     return {"client_types": [dict(r) for r in rows]}
 
 
-@app.get("/get-client-statuses")
+@app.post("/get-client-statuses")
 async def getClientStatuses(conn: Connection = Depends(get_conn)):
     sql = """
             SELECT id, value, color
@@ -1315,7 +1453,7 @@ async def createNewClient(
 # TODO:                         CLIENTS VIEW ENDPOINTS                         #
 ################################################################################
 
-@app.get("/fetch-client")
+@app.post("/fetch-client")
 async def fetchClient(
         client_id: str = Query(..., description="Client UUID"),
         conn: Connection = Depends(get_conn)
@@ -1349,7 +1487,7 @@ async def fetchClient(
     return {"client": dict(row)}
 
 
-@app.get("/fetch-client-invoices")
+@app.post("/fetch-client-invoices")
 async def fetchClientInvoices(
         client_id: str = Query(..., description="Client UUID"),
         size: int = Query(..., gt=0, description="Number of invoices to return"),
@@ -1421,7 +1559,7 @@ async def fetchClientInvoices(
     }
 
 
-@app.get("/fetch-client-onboarding-documents")
+@app.post("/fetch-client-onboarding-documents")
 async def fetchClientOnboardingDocuments(
         client_id: str = Query(..., description="Client UUID"),
         size: int = Query(..., gt=0, description="Number of documents to return"),
@@ -1501,7 +1639,7 @@ async def fetchClientOnboardingDocuments(
     }
 
 
-@app.get("/get-insurance-documents")
+@app.post("/get-insurance-documents")
 async def getInsuranceDocuments(
         client_id: str = Query(..., description="Client UUID"),
         size: int = Query(..., gt=0, description="Number of documents to return"),
@@ -1578,7 +1716,7 @@ async def getInsuranceDocuments(
     }
 
 
-@app.get("/fetch-client-projects")
+@app.post("/fetch-client-projects")
 async def fetchClientProjects(
         client_id: str = Query(..., description="Client UUID"),
         size: int = Query(..., gt=0, description="Number of projects to return"),
@@ -1654,7 +1792,7 @@ async def fetchClientProjects(
 ################################################################################
 
 
-@app.get("/get-billings")
+@app.post("/get-billings")
 async def getBillings(
         size: int = Query(..., gt=0, description="Number of invoices per page"),
         lastSeenCreatedAt: Optional[str] = Query(
@@ -1734,7 +1872,7 @@ async def getBillings(
     }
 
 
-@app.get("/get-billing-statuses")
+@app.post("/get-billing-statuses")
 async def getBillingStatuses(conn: Connection = Depends(get_conn)):
     sql = """
             SELECT id, value, color
@@ -1751,7 +1889,7 @@ async def getBillingStatuses(conn: Connection = Depends(get_conn)):
     return {"billing_statuses": [dict(r) for r in rows]}
 
 
-@app.get("/get-passwords")
+@app.post("/get-passwords")
 async def getPasswords(
         clientId: str = Query(..., description="Client UUID"),
         size: int = Query(..., gt=0, description="Number of passwords per page"),
@@ -1925,7 +2063,7 @@ async def createNewQuote(
     return {"quoteId": quoteId}
 
 
-@app.get("/get-invoice")
+@app.post("/get-invoice")
 async def getInvoice(
         id: str = Query(..., description="Invoice UUID"),
         conn: Connection = Depends(get_conn)
@@ -1943,7 +2081,7 @@ async def getInvoice(
     return {"invoice": dict(row)}
 
 
-@app.get("/get-quote")
+@app.post("/get-quote")
 async def getQuote(
         id: str = Query(..., description="Quote UUID"),
         conn: Connection = Depends(get_conn)
@@ -1965,7 +2103,7 @@ async def getQuote(
 # TODO:                         PROFILE ENDPOINTS                              #
 ################################################################################
 
-@app.get("/get-onboarding-data")
+@app.post("/get-onboarding-data")
 async def getOnboardingData(
         clientId: str = Query(..., description="Client UUID"),
         conn: Connection = Depends(get_conn)
@@ -2224,13 +2362,14 @@ async def updateInsuranceData(
 @app.post("/auth/invite")
 async def inviteUser(
         request: Request,
-        payload: dict = Body(),
-        conn: Connection = Depends(get_conn)
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        enforcer: SyncedEnforcer = Depends(getEnforcer)
 ):
-    email_to_invite = payload.get("emailToInvite")
-    account_type = payload.get("accountType")
-    first_name = payload.get("firstName", "")
-    last_name = payload.get("lastName", "")
+    email_to_invite = data.get("emailToInvite")
+    account_type = data.get("accountType")
+    first_name = data.get("firstName", "")
+    last_name = data.get("lastName", "")
 
     if not email_to_invite:
         raise HTTPException(status_code=400, detail="Invalid email")
@@ -2238,6 +2377,7 @@ async def inviteUser(
         raise HTTPException(status_code=400, detail="Invalid account type")
 
     hex_color = f"#{random.randint(0, 0xFFFFFF):06x}"
+
     await conn.fetchrow(
         "INSERT INTO \"user\" (email, first_name, last_name, hex_color, is_active, is_client) "
         "VALUES ($1,$2,$3,$4,FALSE,$5) RETURNING id",
@@ -2256,17 +2396,25 @@ async def inviteUser(
         ttlHours=24,
     )
 
-    await conn.execute(
-        "INSERT INTO casbin_rule (ptype, subject, domain, object, action) VALUES ('g',$1,$2,'*','')",
+    role = account_type.replace(" ", "_").lower()
+    domain = "*"
+
+    added: bool = enforcer.add_role_for_user_in_domain(
         email_to_invite,
-        account_type.replace(' ', '_').lower()
+        role,
+        domain,
     )
 
-    return {"status": "link sent"}
+    if not added:
+        raise HTTPException(status_code=500, detail="Role assignment failed")
+
+    request.app.state.casbin_watcher.update()
+
+    return {"status": "Link will be sent shortly"}
 
 
 @app.put("/update-user")
-async def updateUser(payload: dict = Body(), conn: Connection = Depends(get_conn)):
+async def updateUser(request: Request, payload: dict = Body(), conn: Connection = Depends(get_conn)):
     user_id = payload.get("userId")
     if not user_id or not await isUUIDv4(user_id):
         raise HTTPException(status_code=400, detail="Invalid userId")
@@ -2279,18 +2427,18 @@ async def updateUser(payload: dict = Body(), conn: Connection = Depends(get_conn
     updates = []
     params = []
     if email:
-        updates.append(f"email=${len(params)+1}")
+        updates.append(f"email=${len(params) + 1}")
         params.append(email)
     if first_name:
-        updates.append(f"first_name=${len(params)+1}")
+        updates.append(f"first_name=${len(params) + 1}")
         params.append(first_name)
     if last_name:
-        updates.append(f"last_name=${len(params)+1}")
+        updates.append(f"last_name=${len(params) + 1}")
         params.append(last_name)
 
     if updates:
         await conn.execute(
-            f"UPDATE \"user\" SET {', '.join(updates)} WHERE id=${len(params)+1}",
+            f"UPDATE \"user\" SET {', '.join(updates)} WHERE id=${len(params) + 1}",
             *params,
             UUID(user_id),
         )
@@ -2306,13 +2454,13 @@ async def updateUser(payload: dict = Body(), conn: Connection = Depends(get_conn
             subj,
             role.replace(' ', '_').lower(),
         )
+        request.app.state.casbin_watcher.update()
 
     return {"status": "updated"}
 
 
 @app.post("/auth/login")
-async def login(request: Request, data: dict = Depends(decryptPayload()), conn: Connection = Depends(get_conn),
-                enforcer: SyncedEnforcer = Depends(getEnforcer)):
+async def login(request: Request, data: dict = Depends(decryptPayload()), conn: Connection = Depends(get_conn)):
     email = data.get("email")
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
@@ -2324,31 +2472,21 @@ async def login(request: Request, data: dict = Depends(decryptPayload()), conn: 
         raise HTTPException(status_code=404, detail="User not found")
     if row["is_blacklisted"]:
         raise HTTPException(status_code=403, detail="blacklisted")
-    userId = row["id"]
-    token = await createMagicLink(
+
+    await createMagicLink(
         conn,
-        userId,
         request.app.state.privateKey,
         purpose="login",
         recipientEmail=email,
         ttlHours=1,
     )
 
-    link = f"/set-recovery-phrase?token={token}"
-    await conn.execute(
-        "INSERT INTO notification (triggered_by_category, triggered_by_id, content) VALUES ($1,$2,$3)",
-        "auth",
-        userId,
-        link,
-    )
-
-    return {"status": "link sent"}
-
+    return {"status": "Link will be sent shortly"}
 
 
 @app.post("/auth/set-recovery-phrase")
 async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayload(True)),
-                            conn: Connection = Depends(get_conn)):
+                            conn: Connection = Depends(get_conn), enforcer: SyncedEnforcer = Depends(getEnforcer)):
     token_str = data.get("token")
     if not token_str:
         raise HTTPException(status_code=400, detail="missing token")
@@ -2400,47 +2538,68 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
             digest,
         )
 
-
         await conn.execute(
             "INSERT INTO user_key (user_email, purpose, public_key) VALUES ($1,'sig',$2) ON CONFLICT (user_email, purpose) DO UPDATE SET public_key=EXCLUDED.public_key",
             userEmail,
             clientPub,
         )
 
-        await conn.execute(
-            "UPDATE \"user\" SET is_active=TRUE, has_set_recovery_phrase=TRUE WHERE email=$1",
-            userEmail,
-        )
-
-
         jti = str(uuid4())
-        exp_dt = datetime.now(timezone.utc) + timedelta(minutes=5)
+        exp_dt = datetime.now(timezone.utc) + timedelta(hours=72)
         await conn.execute(
             "INSERT INTO jwt_token (jti, user_email, expires_at, revoked) VALUES ($1,$2,$3,FALSE)",
             jti,
             userEmail,
-            exp_dt,
+            exp_dt
         )
         redis = request.app.state.redis
         await redis.sadd("active_jtis", jti)
         await redis.publish("jwt_updates", f"add:{jti}")
         await conn.execute("UPDATE magic_link SET consumed=TRUE WHERE uuid=$1", UUID(link_uuid))
-        next_payload = {
-            "next_step": "/onboarding",
-            "exp": int((datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp()),
-        }
+
+        roles = enforcer.get_roles_for_user_in_domain(userEmail, "*")
+        await conn.execute(
+            "UPDATE \"user\" SET is_active=TRUE, onboarding_done=$2, has_set_recovery_phrase=TRUE WHERE email=$1",
+            userEmail,
+            ("client_admin" in roles)
+        )
+
+        if "client_admin" in roles:
+            next_payload = {
+                "next_step": "/onboarding",
+                "exp": int((datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp()),
+            }
+        else:
+            next_payload = {
+                "next_step": "/dashboard",
+                "exp": int((datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp()),
+            }
+
         nav_token = generateJwtRs256(next_payload, request.app.state.privateKey)
         session_token = jwt.encode({"sub": userEmail, "jti": jti, "exp": exp_dt}, SECRET_KEY, algorithm="HS256")
         payload = {"token": nav_token}
+
         if clientPub is not None:
             payload = encryptForClient(payload, clientPub, request.app)
+
         response = JSONResponse(payload)
-        response.set_cookie("session", session_token, httponly=True, secure=True)
+        response.set_cookie(
+            "session",
+            session_token,
+            httponly=True,
+            secure=True,
+            samesite="none",
+            domain="localhost",
+            path="/",
+            max_age=60 * 30,
+        )
+
+        request.app.state.casbin_watcher.update()
+
         return response
 
 
-
-@app.get("/auth/get-recovery-params")
+@app.post("/auth/get-recovery-params")
 async def getRecoveryParams(email: str, conn: Connection = Depends(get_conn)):
     row = await conn.fetchrow(
         """
@@ -2523,6 +2682,40 @@ async def revokeToken(request: Request, conn: Connection = Depends(get_conn)):
     return resp
 
 
+@app.post("/auth/refresh-session")
+async def refreshSession(request: Request, conn: Connection = Depends(get_conn)):
+    token = request.cookies.get("session")
+    if not token:
+        raise HTTPException(status_code=401, detail="no token")
+    try:
+        data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"], options={"verify_exp": False})
+    except Exception:
+        raise HTTPException(status_code=401, detail="invalid")
+    jti = data.get("jti")
+    email = data.get("sub")
+    if not jti or not email:
+        raise HTTPException(status_code=400, detail="bad token")
+    redis = request.app.state.redis
+    if not await redis.sismember("active_jtis", jti):
+        raise HTTPException(status_code=401, detail="revoked")
+    exp_dt = datetime.now(timezone.utc) + timedelta(minutes=5)
+    await conn.execute("UPDATE jwt_token SET expires_at=$1 WHERE jti=$2", exp_dt, jti)
+    session_token = jwt.encode({"sub": email, "jti": jti, "exp": exp_dt}, SECRET_KEY, algorithm="HS256")
+    resp = JSONResponse({"status": "ok"})
+    resp.set_cookie(
+        "session",
+        session_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        domain="localhost",
+        path="/",
+        max_age=60 * 30,
+    )
+
+    return resp
+
+
 @app.post("/admin/blacklist")
 async def blacklistUser(email: str = Body(..., embed=True), request: Request = None,
                         conn: Connection = Depends(get_conn)):
@@ -2543,7 +2736,7 @@ async def unblacklistUser(email: str = Body(..., embed=True), request: Request =
     return {"status": "ok"}
 
 
-@app.get("/connection-test")
+@app.post("/connection-test")
 async def connectionTest():
     return {"status": "ok"}
 
