@@ -198,6 +198,16 @@ def encryptForClient(data: dict, client_pub: bytes, app: FastAPI) -> dict:
     }
 
 
+async def encryptForUser(data: dict, email: str, conn: Connection, app: FastAPI) -> dict:
+    row = await conn.fetchrow(
+        "SELECT public_key FROM user_key WHERE user_email=$1 AND purpose='sig'",
+        email,
+    )
+    if not row:
+        return data
+    return encryptForClient(data, row["public_key"], app)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # startup logic
@@ -431,7 +441,7 @@ async def validateLoginToken(
 
     userEmail = row["user_email"]
     jti = str(uuid4())
-    exp_dt = datetime.now(timezone.utc) + timedelta(minutes=5)
+    exp_dt = datetime.now(timezone.utc) + timedelta(minutes=60)
     await conn.execute(
         "INSERT INTO jwt_token (jti, user_email, expires_at, revoked) VALUES ($1,$2,$3,FALSE)",
         jti,
@@ -458,7 +468,7 @@ async def validateLoginToken(
         samesite="none",
         domain="localhost",
         path="/",
-        max_age=60 * 60,
+        max_age=60 * 60 * 24,
     )
 
     return response
@@ -480,31 +490,110 @@ async def uploadDocument(fileBlob: bytes) -> dict:
 
 @app.post("/global-search")
 async def globalSearch(
-        q: str = Query(..., description="Search query string"),
-        conn: Connection = Depends(get_conn)
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        q: str | None = Query(None, description="Search query string"),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
+    term = data.get("q") or q
+    if not term:
+        raise HTTPException(status_code=400, detail="Missing search term")
     globalSearchSql = """
         SELECT source_table, record_id, search_text, is_deleted
           FROM global_search
-         WHERE is_deleted = FALSE
-           AND length($1::text) >= 3
+         WHERE  length($1::text) >= 3
            AND search_text ILIKE '%' || $1 || '%'
          ORDER BY source_table, record_id
          LIMIT 10;
     """
 
     try:
-        results = await conn.fetch(globalSearchSql, q)
+        results = await conn.fetch(globalSearchSql, term)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"results": [dict(r) for r in results]}
+    payload = {"results": [dict(r) for r in results]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
+
+
+@app.post("/get-account-manager-client-relations")
+async def getAccountManagerClientRelations(conn: Connection = Depends(get_conn)):
+    sql = """
+            SELECT amc.account_manager_email, amc.client_id, c.company_name
+              FROM account_manager_client amc
+              JOIN client c ON c.id = amc.client_id 
+             ORDER BY amc.account_manager_email;
+        """
+    try:
+        rows = await conn.fetch(sql)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"relations": [dict(r) for r in rows]}
+
+
+@app.post("/create-account-manager-client-relation")
+async def createAccountManagerClientRelation(payload: dict = Body(), conn: Connection = Depends(get_conn)):
+    email = payload.get("account_manager_email")
+    clientId = payload.get("client_id")
+    if not email or not clientId:
+        raise HTTPException(status_code=400, detail="Invalid data")
+    sql = "INSERT INTO account_manager_client (account_manager_email, client_id) VALUES ($1,$2) ON CONFLICT DO NOTHING;"
+    try:
+        await conn.execute(sql, email, UUID(clientId))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "created"}
+
+
+@app.post("/delete-account-manager-client-relation")
+async def deleteAccountManagerClientRelation(payload: dict = Body(), conn: Connection = Depends(get_conn)):
+    email = payload.get("account_manager_email")
+    clientId = payload.get("client_id")
+    if not email or not clientId:
+        raise HTTPException(status_code=400, detail="Invalid data")
+    sql = "DELETE FROM account_manager_client WHERE account_manager_email=$1 AND client_id=$2;"
+    try:
+        await conn.execute(sql, email, UUID(clientId))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "deleted"}
+
+
+@app.post("/send-message")
+async def sendMessage(
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
+):
+    project_id = data.get("projectId")
+    content = data.get("content")
+    if not project_id or not content:
+        raise HTTPException(status_code=400, detail="invalid params")
+    try:
+        msg_id = await conn.fetchval(
+            "INSERT INTO message (project_id, sender_id, content) VALUES ($1,$2,$3) RETURNING id",
+            UUID(project_id), user.id, content
+        )
+        created_at = await conn.fetchval(
+            "SELECT created_at FROM message WHERE id=$1", msg_id
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    payload = {"messageId": str(msg_id), "created_at": created_at.isoformat()}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/get-notifications")
 async def getNotifications(
         request: Request,
         data: dict = Depends(decryptPayload()),
-        conn: Connection = Depends(get_conn)
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
     last_seen_created_at = data.get("last_seen_created_at")
     last_seen_id = data.get("last_seen_id")
@@ -554,9 +643,8 @@ async def getNotifications(
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
     }
-    client_pub = data.get("_client_pub")
-    if client_pub is not None:
-        payload = encryptForClient(payload, client_pub, request.app)
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
     return payload
 
 
@@ -575,7 +663,7 @@ async def getProfileDetails(
             SELECT first_name, hex_color
             FROM "user"
             WHERE email = $1
-              AND is_deleted = FALSE
+              
             LIMIT 1;
         """
 
@@ -587,14 +675,18 @@ async def getProfileDetails(
         "first_name": row["first_name"],
         "hex_color": row["hex_color"],
     }
-    client_pub = data.get("_client_pub")
-    if client_pub is not None:
-        payload = encryptForClient(payload, client_pub, request.app)
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
     return payload
 
 
 @app.post("/project-assessments/{project_id}")
-async def getProjectAssessments(project_id: str, db_pool: Pool = Depends(get_db_pool)):
+async def getProjectAssessments(
+        request: Request,
+        project_id: str,
+        db_pool: Pool = Depends(get_db_pool),
+        user: SimpleUser = Depends(getCurrentUser)
+):
     if not await isUUIDv4(project_id):
         raise HTTPException(status_code=400, detail="Invalid project id")
 
@@ -605,16 +697,17 @@ async def getProjectAssessments(project_id: str, db_pool: Pool = Depends(get_db_
       p.planned_resolution,
       p.material_parts_needed
     FROM project p
-    WHERE
-      p.id          = $1
-      AND p.is_deleted = FALSE;
+    WHERE p.id          = $1
     """
 
     async with db_pool.acquire() as conn:
         rec = await conn.fetchrow(sql, UUID(project_id))
     if not rec:
         raise HTTPException(status_code=404, detail="Not found")
-    return dict(rec)
+    payload = dict(rec)
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 ################################################################################
@@ -625,7 +718,8 @@ async def getProjectAssessments(project_id: str, db_pool: Pool = Depends(get_db_
 async def getDashboardMetrics(
         request: Request,
         data: dict = Depends(decryptPayload()),
-        conn: Connection = Depends(get_conn)):
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
     sql = "SELECT * FROM overall_aggregates;"
 
     try:
@@ -633,9 +727,8 @@ async def getDashboardMetrics(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     payload = {"metrics": [dict(r) for r in rows]}
-    client_pub = data.get("_client_pub")
-    if client_pub is not None:
-        payload = encryptForClient(payload, client_pub, request.app)
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
     return payload
 
 
@@ -643,7 +736,8 @@ async def getDashboardMetrics(
 async def getCalendarEvents(
         request: Request,
         data: dict = Depends(decryptPayload()),
-        conn: Connection = Depends(get_conn)
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
     month = data["month"]
 
@@ -655,9 +749,7 @@ async def getCalendarEvents(
           p.*,
           COALESCE(p.scheduled_date, p.due_date) AS event_date
         FROM project p
-        WHERE
-          p.is_deleted = FALSE
-          AND (
+        WHERE  (
             (p.scheduled_date IS NOT NULL AND EXTRACT(MONTH FROM p.scheduled_date) = $1)
             OR
             (p.scheduled_date IS NULL     AND EXTRACT(MONTH FROM p.due_date)       = $1)
@@ -679,9 +771,8 @@ async def getCalendarEvents(
         events.append(d)
 
     payload = {"events": events}
-    client_pub = data.get("_client_pub")
-    if client_pub is not None:
-        payload = encryptForClient(payload, client_pub, request.app)
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
     return payload
 
 
@@ -692,17 +783,16 @@ async def getCalendarEvents(
 
 @app.post("/get-projects")
 async def getProjects(
-        size: int = Query(..., gt=0, description="Number of projects per page"),
-        last_seen_created_at: Optional[str] = Query(
-            None,
-            description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
-        ),
-        last_seen_id: Optional[UUID] = Query(
-            None,
-            description="UUID cursor to break ties if multiple rows share the same timestamp"
-        ),
-        conn: Connection = Depends(get_conn)
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
+    size = data.get("size")
+    last_seen_created_at = data.get("last_seen_created_at")
+    last_seen_id = data.get("last_seen_id")
+    if not size:
+        raise HTTPException(status_code=400, detail="size required")
     # 1) parse the timestamp (or default to now)
     if last_seen_created_at:
         try:
@@ -730,9 +820,8 @@ async def getProjects(
     FROM project p
     JOIN client  c ON c.id = p.client_id
     JOIN status  s ON s.id = p.status_id AND s.category = 'project'
-    WHERE
       (p.created_at, p.id) < ($1::timestamptz, $2::uuid)
-      AND p.is_deleted = FALSE
+      
     ORDER BY p.created_at DESC, p.id DESC
     LIMIT $3;
     """
@@ -753,22 +842,28 @@ async def getProjects(
         next_ts = None
         next_id = None
 
-    return {
+    payload = {
         "projects": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
     }
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/get-project-statuses")
-async def getProjectStatuses(conn: Connection = Depends(get_conn)):
+async def getProjectStatuses(
+        request: Request,
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
     sql = """
             SELECT id, value, color
             FROM status
             WHERE category = 'project'
-              AND is_deleted = FALSE
+              
             ORDER BY value;
         """
 
@@ -776,15 +871,20 @@ async def getProjectStatuses(conn: Connection = Depends(get_conn)):
         rows = await conn.fetch(sql)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"project_statuses": [dict(r) for r in rows]}
+    payload = {"project_statuses": [dict(r) for r in rows]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/get-project-types")
-async def getProjectTypes(conn: Connection = Depends(get_conn)):
+async def getProjectTypes(
+        request: Request,
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
     sql = """
             SELECT id, value
             FROM project_type
-            WHERE is_deleted = FALSE
             ORDER BY value;
         """
 
@@ -792,15 +892,20 @@ async def getProjectTypes(conn: Connection = Depends(get_conn)):
         rows = await conn.fetch(sql)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"project_types": [dict(r) for r in rows]}
+    payload = {"project_types": [dict(r) for r in rows]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/get-project-trades")
-async def getProjectTrades(conn: Connection = Depends(get_conn)):
+async def getProjectTrades(
+        request: Request,
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
     sql = """
             SELECT id, value
             FROM project_trade
-            WHERE is_deleted = FALSE
             ORDER BY value;
         """
 
@@ -808,15 +913,20 @@ async def getProjectTrades(conn: Connection = Depends(get_conn)):
         rows = await conn.fetch(sql)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"project_trades": [dict(r) for r in rows]}
+    payload = {"project_trades": [dict(r) for r in rows]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/get-project-priorities")
-async def getProjectPriorities(conn: Connection = Depends(get_conn)):
+async def getProjectPriorities(
+        request: Request,
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
     sql = """
             SELECT id, value, color
             FROM project_priority
-            WHERE is_deleted = FALSE
             ORDER BY value;
         """
 
@@ -824,13 +934,104 @@ async def getProjectPriorities(conn: Connection = Depends(get_conn)):
         rows = await conn.fetch(sql)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"project_priorities": [dict(r) for r in rows]}
+    payload = {"project_priorities": [dict(r) for r in rows]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
+
+
+@app.post("/get-all-client-admins")
+async def getAllClientAdmins(
+        request: Request,
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
+    sql = """
+            SELECT u.id, u.email, c.company_name
+              FROM "user" u
+              JOIN casbin_rule r
+                ON r.ptype = 'g'
+               AND r.subject = u.email
+               AND r.domain = 'client_admin'
+              JOIN client c ON c.id = u.client_id
+               
+             ORDER BY c.company_name;
+        """
+    try:
+        rows = await conn.fetch(sql)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    payload = {"client_admins": [dict(r) for r in rows]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
+
+
+@app.post("/get-account-managers")
+async def getAccountManagers(
+        request: Request,
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
+    sql = """
+            SELECT u.id, u.email, u.first_name, u.last_name
+              FROM "user" u
+              JOIN casbin_rule r
+                ON r.ptype = 'g'
+               AND r.subject = u.email
+               AND r.domain = 'employee_account_manager'
+             WHERE  u.is_active = TRUE
+             ORDER BY u.first_name;
+        """
+    try:
+        rows = await conn.fetch(sql)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    payload = {"account_managers": [dict(r) for r in rows]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
+
+
+@app.post("/get-states")
+async def getStates(
+        request: Request,
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
+    sql = """
+            SELECT id, name
+              FROM state
+             ORDER BY name;
+        """
+    try:
+        rows = await conn.fetch(sql)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    payload = {"states": [dict(r) for r in rows]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
+
+
+# List all users for admin page
+@app.post("/get-users")
+async def getUsers(conn: Connection = Depends(get_conn)):
+    sql = """
+            SELECT id, email, first_name, last_name
+              FROM "user"
+             ORDER BY first_name;
+        """
+    try:
+        rows = await conn.fetch(sql)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"users": [dict(r) for r in rows]}
 
 
 @app.post("/create-new-project")
 async def createNewProject(
-        payload: dict = Body(...),
-        conn: Connection = Depends(get_conn)
+        request: Request,
+        payload: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
     clientId = payload.get("client")
     businessName = payload.get("businessName")
@@ -855,22 +1056,22 @@ async def createNewProject(
 
     async with conn.transaction():
         priorityId = await conn.fetchval(
-            "SELECT id FROM project_priority WHERE value=$1 AND is_deleted=FALSE LIMIT 1;",
+            "SELECT id FROM project_priority WHERE value=$1  LIMIT 1;",
             priorityValue,
         )
         tradeId = await conn.fetchval(
-            "SELECT id FROM project_trade WHERE value=$1 AND is_deleted=FALSE LIMIT 1;",
+            "SELECT id FROM project_trade WHERE value=$1  LIMIT 1;",
             tradeValue,
         )
         stateId = await conn.fetchval(
-            "SELECT id FROM state WHERE name=$1 AND is_deleted=FALSE LIMIT 1;",
+            "SELECT id FROM state WHERE name=$1  LIMIT 1;",
             stateName,
         )
         typeId = await conn.fetchval(
-            "SELECT id FROM project_type WHERE is_deleted=FALSE LIMIT 1;"
+            "SELECT id FROM project_type WHERE LIMIT 1;"
         )
         statusId = await conn.fetchval(
-            "SELECT id FROM status WHERE category='project' AND value='Open' AND is_deleted=FALSE LIMIT 1;"
+            "SELECT id FROM status WHERE category='project' AND value='Open'  LIMIT 1;"
         )
         projectId = await conn.fetchval(
             """
@@ -903,7 +1104,10 @@ async def createNewProject(
             assigneeId,
         )
 
-    return {"projectId": projectId}
+    payloadRes = {"projectId": projectId}
+    if user:
+        payloadRes = await encryptForUser(payloadRes, user.email, conn, request.app)
+    return payloadRes
 
 
 ################################################################################
@@ -911,8 +1115,11 @@ async def createNewProject(
 ################################################################################
 @app.post("/fetch-project")
 async def fetchProject(
+        request: Request,
         project_id: str = Query(..., description="Project UUID"),
-        conn: Connection = Depends(get_conn)
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser),
+        enforcer: SyncedEnforcer = Depends(getEnforcer)
 ):
     sql = """
         SELECT
@@ -973,64 +1180,67 @@ async def fetchProject(
 
           JOIN "user" cu
             ON cu.id = p.client_id
-           AND cu.is_deleted = FALSE
+           
 
           LEFT JOIN client c
             ON c.id = cu.client_id
-           AND c.is_deleted = FALSE
+           
            AND cut.name = 'client'
 
           JOIN project_priority pp
             ON pp.id = p.priority_id
-           AND pp.is_deleted = FALSE
+           
 
           JOIN project_type pt
             ON pt.id = p.type_id
-           AND pt.is_deleted = FALSE
+           
 
           JOIN state st
             ON st.id = p.state_id
-           AND st.is_deleted = FALSE
+           
 
           JOIN project_trade tr
             ON tr.id = p.trade_id
-           AND tr.is_deleted = FALSE
+           
 
           JOIN status s
             ON s.id = p.status_id
            AND s.category = 'project'
-           AND s.is_deleted = FALSE
+           
 
           JOIN "user" au
             ON au.id = p.assignee_id
-           AND au.is_deleted = FALSE
-
-        WHERE
-          p.id = $1
-          AND p.is_deleted = FALSE;
+          WHERE p.id = $1
         """
     try:
         row = await conn.fetchrow(sql, project_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return {"project": dict(row)}
+    project = dict(row)
+    roles = enforcer.get_roles_for_user_in_domain(user.email, "*") if user else []
+    if "client_technician" in roles:
+        project.pop("nte", None)
+
+    payload = {"project": project}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/get-messages")
 async def getMessages(
-        projectId: str = Query(..., description="Project UUID"),
-        size: int = Query(..., gt=0, description="Number of messages to return"),
-        last_seen_created_at: Optional[str] = Query(
-            None,
-            description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
-        ),
-        last_seen_id: Optional[UUID] = Query(
-            None,
-            description="UUID cursor to break ties if multiple rows share the same timestamp"
-        ),
-        conn: Connection = Depends(get_conn)
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
+    projectId = data.get("projectId")
+    size = data.get("size")
+    last_seen_created_at = data.get("last_seen_created_at")
+    last_seen_id = data.get("last_seen_id")
+    if not projectId or not size:
+        raise HTTPException(status_code=400, detail="invalid params")
     if last_seen_created_at:
         try:
             dt = datetime.fromisoformat(last_seen_created_at)
@@ -1061,16 +1271,14 @@ async def getMessages(
             FROM message m
             JOIN project p
               ON p.id = m.project_id
-             AND p.is_deleted = FALSE
+             
             JOIN "user" u
               ON u.id = m.sender_id
-             AND u.is_deleted = FALSE
+             
             JOIN user_type ut
               ON ut.id = u.type_id
-             AND ut.is_deleted = FALSE
-            WHERE
-              m.is_deleted    = FALSE
-              AND m.project_id = $1
+             
+            WHERE  m.project_id = $1
               AND (m.created_at, m.id) < ($2::timestamptz, $3::uuid)
             ORDER BY m.created_at DESC, m.id DESC
             LIMIT $4;
@@ -1091,29 +1299,31 @@ async def getMessages(
         next_ts = None
         next_id = None
 
-    return {
+    payload = {
         "messages": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
     }
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/fetch-project-quotes")
 async def fetchProjectQuotesEndpoint(
-        project_id: str = Query(..., description="Project UUID"),
-        size: int = Query(..., gt=0, description="Number of quotes to return"),
-        last_seen_created_at: Optional[str] = Query(
-            None,
-            description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
-        ),
-        last_seen_id: Optional[UUID] = Query(
-            None,
-            description="UUID cursor to break ties if multiple rows share the same timestamp"
-        ),
-        conn: Connection = Depends(get_conn)
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
+    project_id = data.get("project_id")
+    size = data.get("size")
+    last_seen_created_at = data.get("last_seen_created_at")
+    last_seen_id = data.get("last_seen_id")
+    if not project_id or not size:
+        raise HTTPException(status_code=400, detail="invalid params")
     if last_seen_created_at:
         try:
             dt = datetime.fromisoformat(last_seen_created_at)
@@ -1141,10 +1351,9 @@ async def fetchProjectQuotesEndpoint(
         JOIN status s
           ON s.id = q.status_id
          AND s.category = 'quote'
-         AND s.is_deleted = FALSE
-        WHERE
+         
           q.project_id = $1
-          AND q.is_deleted = FALSE
+          
           AND (q.created_at, q.id) < ($2::timestamptz, $3::uuid)
         ORDER BY q.created_at DESC, q.id DESC
         LIMIT $4;
@@ -1164,7 +1373,7 @@ async def fetchProjectQuotesEndpoint(
         next_ts = None
         next_id = None
 
-    return {
+    payload = {
         "quotes": [
             {
                 "quote_id": r["quote_id"],
@@ -1180,22 +1389,24 @@ async def fetchProjectQuotesEndpoint(
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
     }
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/fetch-project-documents")
 async def fetchProjectDocumentsEndpoint(
-        project_id: str = Query(..., description="Project UUID"),
-        size: int = Query(..., gt=0, description="Number of documents to return"),
-        last_seen_created_at: Optional[str] = Query(
-            None,
-            description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
-        ),
-        last_seen_id: Optional[UUID] = Query(
-            None,
-            description="UUID cursor to break ties if multiple rows share the same timestamp"
-        ),
-        conn: Connection = Depends(get_conn)
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
+    project_id = data.get("project_id")
+    size = data.get("size")
+    last_seen_created_at = data.get("last_seen_created_at")
+    last_seen_id = data.get("last_seen_id")
+    if not project_id or not size:
+        raise HTTPException(status_code=400, detail="invalid params")
     if last_seen_created_at:
         try:
             dt = datetime.fromisoformat(last_seen_created_at)
@@ -1220,9 +1431,8 @@ async def fetchProjectDocumentsEndpoint(
           d.created_at          AS date_uploaded,
           COUNT(*) OVER()       AS total_count
         FROM document d
-        WHERE
           d.project_id = $1
-          AND d.is_deleted = FALSE
+          
           AND (d.created_at, d.id) < ($2::timestamptz, $3::uuid)
         ORDER BY d.created_at DESC, d.id DESC
         LIMIT $4;
@@ -1242,7 +1452,7 @@ async def fetchProjectDocumentsEndpoint(
         next_ts = None
         next_id = None
 
-    return {
+    payload = {
         "documents": [
             {
                 "document_id": r["document_id"],
@@ -1258,6 +1468,9 @@ async def fetchProjectDocumentsEndpoint(
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
     }
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 ################################################################################
@@ -1305,14 +1518,14 @@ async def getClients(
             JOIN status s
               ON s.id = c.status_id
              AND s.category = 'client'
-             AND s.is_deleted = FALSE
+             
             JOIN client_type ct
               ON ct.id = c.type_id
-             AND ct.is_deleted = FALSE
+             
             LEFT JOIN client_aggregates ca
               ON ca.client_id = c.id
             WHERE (c.created_at, c.id) < ($1::timestamptz, $2::uuid)
-              AND c.is_deleted = FALSE
+              
             ORDER BY c.created_at DESC, c.id DESC
             LIMIT $3;
         """
@@ -1346,7 +1559,6 @@ async def getClientTypes(conn: Connection = Depends(get_conn)):
     sql = """
             SELECT id, value
             FROM client_type
-            WHERE is_deleted = FALSE
             ORDER BY value;
         """
 
@@ -1363,7 +1575,7 @@ async def getClientStatuses(conn: Connection = Depends(get_conn)):
             SELECT id, value, color
             FROM status
             WHERE category = 'client'
-              AND is_deleted = FALSE
+              
             ORDER BY value;
         """
 
@@ -1400,15 +1612,15 @@ async def createNewClient(
 
     async with conn.transaction():
         typeId = await conn.fetchval(
-            "SELECT id FROM client_type WHERE value=$1 AND is_deleted=FALSE LIMIT 1;",
+            "SELECT id FROM client_type WHERE value=$1  LIMIT 1;",
             clientType,
         )
         stateId = await conn.fetchval(
-            "SELECT id FROM state WHERE name=$1 AND is_deleted=FALSE LIMIT 1;",
+            "SELECT id FROM state WHERE name=$1  LIMIT 1;",
             stateName,
         )
         statusId = await conn.fetchval(
-            "SELECT id FROM status WHERE category='client' AND value='Active' AND is_deleted=FALSE LIMIT 1;"
+            "SELECT id FROM status WHERE category='client' AND value='Active'  LIMIT 1;"
         )
         clientId = await conn.fetchval(
             """
@@ -1481,9 +1693,9 @@ async def fetchClient(
           c.updates,
           c.special_notes
         FROM client c
-        JOIN state st ON st.id = c.state_id AND st.is_deleted = FALSE
-        JOIN status s ON s.id = c.status_id AND s.category = 'client' AND s.is_deleted = FALSE
-        WHERE c.id = $1 AND c.is_deleted = FALSE;
+        JOIN state st ON st.id = c.state_id 
+        JOIN status s ON s.id = c.status_id AND s.category = 'client' 
+        WHERE c.id = $1 ;
     """
 
     try:
@@ -1501,6 +1713,7 @@ async def fetchClient(
 async def fetchClientInvoices(
         client_id: str = Query(..., description="Client UUID"),
         size: int = Query(..., gt=0, description="Number of invoices to return"),
+        q: Optional[str] = Query(None, description="Search query"),
         last_seen_created_at: Optional[str] = Query(
             None,
             description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
@@ -1536,17 +1749,17 @@ async def fetchClientInvoices(
           s.value         AS status_value,
           COUNT(*) OVER() AS total_count
         FROM invoice i
-        JOIN status s ON s.id = i.status_id AND s.category = 'invoice' AND s.is_deleted = FALSE
-        WHERE
+        JOIN status s ON s.id = i.status_id AND s.category = 'invoice' 
           i.client_id = $1
-          AND i.is_deleted = FALSE
+          
           AND (i.created_at, i.id) < ($2::timestamptz, $3::uuid)
+          AND ($4::text IS NULL OR i.number::text ILIKE '%' || $4 || '%')
         ORDER BY i.created_at DESC, i.id DESC
-        LIMIT $4;
+        LIMIT $5;
     """
 
     try:
-        rows = await conn.fetch(sql, client_id, cursor_ts, cursor_id, size)
+        rows = await conn.fetch(sql, client_id, cursor_ts, cursor_id, q, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1571,8 +1784,11 @@ async def fetchClientInvoices(
 
 @app.post("/fetch-client-onboarding-documents")
 async def fetchClientOnboardingDocuments(
-        client_id: str = Query(..., description="Client UUID"),
-        size: int = Query(..., gt=0, description="Number of documents to return"),
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        client_id: Optional[str] = Query(None, description="Client UUID"),
+        size: Optional[int] = Query(None, gt=0, description="Number of documents to return"),
+        q: Optional[str] = Query(None, description="Search query"),
         last_seen_created_at: Optional[str] = Query(
             None,
             description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
@@ -1581,8 +1797,14 @@ async def fetchClientOnboardingDocuments(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
-        conn: Connection = Depends(get_conn)
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
+    client_id = data.get("clientId") or client_id
+    size = data.get("size", size)
+    q = data.get("q", q)
+    last_seen_created_at = data.get("last_seen_created_at", last_seen_created_at)
+    last_seen_id = data.get("last_seen_id", last_seen_id)
     if last_seen_created_at:
         try:
             dt = datetime.fromisoformat(last_seen_created_at)
@@ -1607,17 +1829,17 @@ async def fetchClientOnboardingDocuments(
           d.created_at     AS date_uploaded,
           COUNT(*) OVER()  AS total_count
         FROM document d
-        WHERE
           d.client_id = $1
           AND d.purpose = 'onboarding_paperwork'
-          AND d.is_deleted = FALSE
+          
           AND (d.created_at, d.id) < ($2::timestamptz, $3::uuid)
+          AND ($4::text IS NULL OR d.file_name ILIKE '%' || $4 || '%')
         ORDER BY d.created_at DESC, d.id DESC
-        LIMIT $4;
+        LIMIT $5;
     """
 
     try:
-        rows = await conn.fetch(sql, client_id, cursor_ts, cursor_id, size)
+        rows = await conn.fetch(sql, client_id, cursor_ts, cursor_id, q, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1631,7 +1853,7 @@ async def fetchClientOnboardingDocuments(
         next_ts = None
         next_id = None
 
-    return {
+    payload = {
         "documents": [
             {
                 "document_id": r["document_id"],
@@ -1647,12 +1869,18 @@ async def fetchClientOnboardingDocuments(
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
     }
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/get-insurance-documents")
 async def getInsuranceDocuments(
-        client_id: str = Query(..., description="Client UUID"),
-        size: int = Query(..., gt=0, description="Number of documents to return"),
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        client_id: Optional[str] = Query(None, description="Client UUID"),
+        size: Optional[int] = Query(None, gt=0, description="Number of documents to return"),
+        q: Optional[str] = Query(None, description="Search query"),
         last_seen_created_at: Optional[str] = Query(
             None,
             description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
@@ -1661,8 +1889,14 @@ async def getInsuranceDocuments(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
-        conn: Connection = Depends(get_conn)
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
+    client_id = data.get("clientId") or client_id
+    size = data.get("size", size)
+    q = data.get("q", q)
+    last_seen_created_at = data.get("last_seen_created_at", last_seen_created_at)
+    last_seen_id = data.get("last_seen_id", last_seen_id)
     if last_seen_created_at:
         try:
             dt = datetime.fromisoformat(last_seen_created_at)
@@ -1687,16 +1921,16 @@ async def getInsuranceDocuments(
           d.created_at     AS date_uploaded,
           COUNT(*) OVER()  AS total_count
         FROM document d
-        WHERE
           d.client_id = $1
           AND d.purpose = 'insurance'
-          AND d.is_deleted = FALSE
+          
           AND (d.created_at, d.id) < ($2::timestamptz, $3::uuid)
+          AND ($4::text IS NULL OR d.file_name ILIKE '%' || $4 || '%')
         ORDER BY d.created_at DESC, d.id DESC
-        LIMIT $4;
+        LIMIT $5;
     """
 
-    rows = await conn.fetch(sql, client_id, cursor_ts, cursor_id, size)
+    rows = await conn.fetch(sql, client_id, cursor_ts, cursor_id, q, size)
 
     total = rows[0]["total_count"] if rows else 0
 
@@ -1708,7 +1942,7 @@ async def getInsuranceDocuments(
         next_ts = None
         next_id = None
 
-    return {
+    payload = {
         "documents": [
             {
                 "document_id": r["document_id"],
@@ -1724,12 +1958,16 @@ async def getInsuranceDocuments(
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
     }
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/fetch-client-projects")
 async def fetchClientProjects(
         client_id: str = Query(..., description="Client UUID"),
         size: int = Query(..., gt=0, description="Number of projects to return"),
+        q: Optional[str] = Query(None, description="Search query"),
         last_seen_created_at: Optional[str] = Query(
             None,
             description="ISO-8601 UTC timestamp cursor (e.g. 2025-05-24T12:00:00Z)"
@@ -1764,18 +2002,18 @@ async def fetchClientProjects(
           s.value         AS status_value,
           COUNT(*) OVER() AS total_count
         FROM project p
-        JOIN status s ON s.id = p.status_id AND s.category = 'project' AND s.is_deleted = FALSE
-        WHERE
+        JOIN status s ON s.id = p.status_id AND s.category = 'project' 
           p.client_id = $1
           AND s.value = 'Open'
-          AND p.is_deleted = FALSE
+          
           AND (p.created_at, p.id) < ($2::timestamptz, $3::uuid)
+          AND ($4::text IS NULL OR p.business_name ILIKE '%' || $4 || '%')
         ORDER BY p.created_at DESC, p.id DESC
-        LIMIT $4;
+        LIMIT $5;
     """
 
     try:
-        rows = await conn.fetch(sql, client_id, cursor_ts, cursor_id, size)
+        rows = await conn.fetch(sql, client_id, cursor_ts, cursor_id, q, size)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1848,12 +2086,12 @@ async def getBillings(
         JOIN status s
           ON s.id = i.status_id
          AND s.category = 'billing'
-         AND s.is_deleted = FALSE
+         
         LEFT JOIN document d
           ON d.id = i.file_id
-         AND d.is_deleted = FALSE
+         
         WHERE (i.created_at, i.id) < ($1::timestamptz, $2::uuid)
-          AND i.is_deleted = FALSE
+          
         ORDER BY i.created_at DESC, i.id DESC
         LIMIT $3;
     """
@@ -1888,7 +2126,7 @@ async def getBillingStatuses(conn: Connection = Depends(get_conn)):
             SELECT id, value, color
             FROM status
             WHERE category = 'billing'
-              AND is_deleted = FALSE
+              
             ORDER BY value;
         """
 
@@ -1897,6 +2135,38 @@ async def getBillingStatuses(conn: Connection = Depends(get_conn)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"billing_statuses": [dict(r) for r in rows]}
+
+
+@app.post("/get-invoice-statuses")
+async def getInvoiceStatuses(conn: Connection = Depends(get_conn)):
+    sql = """
+            SELECT id, value, color
+              FROM status
+             WHERE category = 'invoice'
+               
+             ORDER BY value;
+        """
+    try:
+        rows = await conn.fetch(sql)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"invoice_statuses": [dict(r) for r in rows]}
+
+
+@app.post("/get-quote-statuses")
+async def getQuoteStatuses(conn: Connection = Depends(get_conn)):
+    sql = """
+            SELECT id, value, color
+              FROM status
+             WHERE category = 'quote'
+               
+             ORDER BY value;
+        """
+    try:
+        rows = await conn.fetch(sql)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"quote_statuses": [dict(r) for r in rows]}
 
 
 @app.post("/get-passwords")
@@ -1996,7 +2266,7 @@ async def createNewInvoice(
         )
 
         statusId = await conn.fetchval(
-            "SELECT id FROM status WHERE category='billing' AND value='Pending' AND is_deleted=FALSE LIMIT 1;"
+            "SELECT id FROM status WHERE category='billing' AND value='Pending'  LIMIT 1;"
         )
 
         invoiceId = await conn.fetchval(
@@ -2054,7 +2324,7 @@ async def createNewQuote(
         )
 
         statusId = await conn.fetchval(
-            "SELECT id FROM status WHERE category='quote' AND value='Pending' AND is_deleted=FALSE LIMIT 1;"
+            "SELECT id FROM status WHERE category='quote' AND value='Pending'  LIMIT 1;"
         )
 
         quoteId = await conn.fetchval(
@@ -2081,8 +2351,8 @@ async def getInvoice(
     sql = """
         SELECT i.*, d.file_url, d.document_type
           FROM invoice i
-          LEFT JOIN document d ON d.id = i.file_id AND d.is_deleted = FALSE
-         WHERE i.id = $1 AND i.is_deleted = FALSE
+          LEFT JOIN document d ON d.id = i.file_id 
+         WHERE i.id = $1 
          LIMIT 1;
     """
     row = await conn.fetchrow(sql, id)
@@ -2099,8 +2369,8 @@ async def getQuote(
     sql = """
         SELECT q.*, d.file_url, d.document_type
           FROM quote q
-          LEFT JOIN document d ON d.id = q.file_id AND d.is_deleted = FALSE
-         WHERE q.id = $1 AND q.is_deleted = FALSE
+          LEFT JOIN document d ON d.id = q.file_id 
+         WHERE q.id = $1 
          LIMIT 1;
     """
     row = await conn.fetchrow(sql, id)
@@ -2115,9 +2385,13 @@ async def getQuote(
 
 @app.post("/get-onboarding-data")
 async def getOnboardingData(
-        clientId: str = Query(..., description="Client UUID"),
-        conn: Connection = Depends(get_conn)
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        clientId: Optional[str] = Query(None, description="Client UUID"),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
+    clientId = data.get("clientId") or clientId
     if not clientId or not isUUIDv4(clientId):
         raise HTTPException(
             status_code=400,
@@ -2128,27 +2402,27 @@ async def getOnboardingData(
         SELECT satellite_office_address, organization_type, establishment_year,
                annual_revenue, accepted_payment_methods, naics_code, duns_number
           FROM client_onboarding_general
-         WHERE client_id = $1 AND is_deleted = FALSE
+         WHERE client_id = $1 
          LIMIT 1;
     """
     serviceSql = """
         SELECT coverage_area, admin_staff_count, field_staff_count, licenses,
                working_hours, covers_after_hours, covers_weekend_calls
           FROM client_onboarding_service
-         WHERE client_id = $1 AND is_deleted = FALSE
+         WHERE client_id = $1 
          LIMIT 1;
     """
     contactSql = """
         SELECT dispatch_supervisor, field_supervisor, management_supervisor,
                regular_hours_contact, emergency_hours_contact
           FROM client_onboarding_contact
-         WHERE client_id = $1 AND is_deleted = FALSE
+         WHERE client_id = $1 
          LIMIT 1;
     """
     loadSql = """
         SELECT avg_monthly_tickets_last4, po_source_split, monthly_po_capacity
           FROM client_onboarding_load
-         WHERE client_id = $1 AND is_deleted = FALSE
+         WHERE client_id = $1 
          LIMIT 1;
     """
     tradeSql = """
@@ -2156,18 +2430,18 @@ async def getOnboardingData(
           FROM client_trade_coverage tc
           JOIN project_trade pt ON pt.id = tc.project_trade_id
          WHERE tc.client_id = $1
-           AND tc.is_deleted = FALSE
-           AND pt.is_deleted = FALSE;
+           
+           ;
     """
     pricingSql = """
         SELECT item_label, regular_hours_rate, after_hours_rate, is_custom
           FROM client_pricing_structure
-         WHERE client_id = $1 AND is_deleted = FALSE;
+         WHERE client_id = $1 ;
     """
     refsSql = """
         SELECT company_name, contact_name, contact_email, contact_phone
           FROM client_references
-         WHERE client_id = $1 AND is_deleted = FALSE;
+         WHERE client_id = $1 ;
     """
 
     try:
@@ -2181,7 +2455,7 @@ async def getOnboardingData(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return {
+    payload = {
         "general": dict(generalRow) if generalRow else {},
         "service": dict(serviceRow) if serviceRow else {},
         "contact": dict(contactRow) if contactRow else {},
@@ -2190,6 +2464,9 @@ async def getOnboardingData(
         "pricing": [dict(r) for r in pricingRows],
         "references": [dict(r) for r in refsRows],
     }
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 ################################################################################
@@ -2199,8 +2476,10 @@ async def getOnboardingData(
 
 @app.post("/save-onboarding-data")
 async def saveOnboardingData(
-        payload: dict = Body(...),
-        conn: Connection = Depends(get_conn)
+        request: Request,
+        payload: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
     clientId = payload.get("clientId")
 
@@ -2287,7 +2566,7 @@ async def saveOnboardingData(
             if not tradeValue or not coverageLevel:
                 continue
             tradeId = await conn.fetchval(
-                "SELECT id FROM project_trade WHERE value=$1 AND is_deleted=FALSE LIMIT 1;",
+                "SELECT id FROM project_trade WHERE value=$1  LIMIT 1;",
                 tradeValue,
             )
             if tradeId:
@@ -2334,13 +2613,18 @@ async def saveOnboardingData(
                 ref.get("phone"),
             )
 
-    return {"status": "success"}
+    resp_payload = {"status": "success"}
+    if user:
+        resp_payload = await encryptForUser(resp_payload, user.email, conn, request.app)
+    return resp_payload
 
 
 @app.post("/update-insurance-data")
 async def updateInsuranceData(
-        payload: dict = Body(...),
-        conn: Connection = Depends(get_conn)
+        request: Request,
+        payload: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
     clientId = payload.get("clientId")
     provider = payload.get("provider")
@@ -2366,7 +2650,10 @@ async def updateInsuranceData(
         endDate,
     )
 
-    return {"insuranceId": insuranceId}
+    resp_payload = {"insuranceId": insuranceId}
+    if user:
+        resp_payload = await encryptForUser(resp_payload, user.email, conn, request.app)
+    return resp_payload
 
 
 @app.post("/auth/invite")
@@ -2386,18 +2673,6 @@ async def inviteUser(
     if not account_type:
         raise HTTPException(status_code=400, detail="Invalid account type")
 
-    hex_color = f"#{random.randint(0, 0xFFFFFF):06x}"
-
-    await conn.fetchrow(
-        "INSERT INTO \"user\" (email, first_name, last_name, hex_color, is_active, is_client) "
-        "VALUES ($1,$2,$3,$4,FALSE,$5) RETURNING id",
-        email_to_invite,
-        first_name,
-        last_name,
-        hex_color,
-        account_type.startswith("Client")
-    )
-
     await createMagicLink(
         conn,
         request.app.state.privateKey,
@@ -2405,20 +2680,6 @@ async def inviteUser(
         recipientEmail=email_to_invite,
         ttlHours=24,
     )
-
-    role = account_type.replace(" ", "_").lower()
-    domain = "*"
-
-    added: bool = enforcer.add_role_for_user_in_domain(
-        email_to_invite,
-        role,
-        domain,
-    )
-
-    if not added:
-        raise HTTPException(status_code=500, detail="Role assignment failed")
-
-    request.app.state.casbin_watcher.update()
 
     return {"status": "Link will be sent shortly"}
 
@@ -2469,13 +2730,76 @@ async def updateUser(request: Request, payload: dict = Body(), conn: Connection 
     return {"status": "updated"}
 
 
+TABLE_FIELDS = {
+    "project_priority": ["value", "color"],
+    "project_type": ["value"],
+    "project_trade": ["value"],
+    "state": ["name"],
+    "status": ["category", "value", "color"],
+}
+
+
+@app.post("/admin/create-record")
+async def adminCreateRecord(payload: dict = Body(), conn: Connection = Depends(get_conn)):
+    table = payload.get("table")
+    fields = TABLE_FIELDS.get(table)
+    if not table or not fields:
+        raise HTTPException(status_code=400, detail="Invalid table")
+    values = [payload.get(f) for f in fields]
+    placeholders = ",".join(f"${i+1}" for i in range(len(fields)))
+    sql = f"INSERT INTO {table} ({', '.join(fields)}) VALUES ({placeholders}) RETURNING id;"
+    try:
+        newId = await conn.fetchval(sql, *values)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"id": str(newId)}
+
+
+@app.put("/admin/update-record")
+async def adminUpdateRecord(payload: dict = Body(), conn: Connection = Depends(get_conn)):
+    table = payload.get("table")
+    recordId = payload.get("id")
+    fields = TABLE_FIELDS.get(table)
+    if not table or not fields or not recordId:
+        raise HTTPException(status_code=400, detail="Invalid data")
+    updates = []
+    params = []
+    for f in fields:
+        if f in payload:
+            params.append(payload[f])
+            updates.append(f"{f}=${len(params)}")
+    params.append(UUID(recordId))
+    if not updates:
+        return {"status": "no-op"}
+    sql = f"UPDATE {table} SET {', '.join(updates)}, updated_at=now() WHERE id=${len(params)};"
+    try:
+        await conn.execute(sql, *params)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "updated"}
+
+
+@app.post("/admin/delete-record")
+async def adminDeleteRecord(payload: dict = Body(), conn: Connection = Depends(get_conn)):
+    table = payload.get("table")
+    recordId = payload.get("id")
+    if not table or not recordId or table not in TABLE_FIELDS:
+        raise HTTPException(status_code=400, detail="Invalid data")
+    sql = f"UPDATE {table} SET is_deleted=TRUE, deleted_at=now() WHERE id=$1;"
+    try:
+        await conn.execute(sql, UUID(recordId))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "deleted"}
+
+
 @app.post("/auth/login")
 async def login(request: Request, data: dict = Depends(decryptPayload()), conn: Connection = Depends(get_conn)):
     email = data.get("email")
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
     row = await conn.fetchrow(
-        "SELECT id, is_blacklisted FROM \"user\" WHERE email=$1 AND is_deleted=FALSE",
+        "SELECT id, is_blacklisted FROM \"user\" WHERE email=$1 ",
         email,
     )
     if not row:
@@ -2519,6 +2843,37 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
     # When called with encrypted data, finalize recovery setup
     userEmail = data.get("userEmail")
     if userEmail:
+        first_name = data.get("firstName", "")
+        last_name = data.get("lastName", "")
+        account_type = data.get("accountType", "Client")
+        existing = await conn.fetchrow(
+            "SELECT id FROM \"user\" WHERE email=$1 ",
+            userEmail,
+        )
+        if not existing:
+            hex_color = f"#{random.randint(0, 0xFFFFFF):06x}"
+            await conn.fetchrow(
+                "INSERT INTO \"user\" (email, first_name, last_name, hex_color, is_active, is_client) "
+                "VALUES ($1,$2,$3,$4,FALSE,$5) RETURNING id",
+                userEmail,
+                first_name,
+                last_name,
+                hex_color,
+                account_type.startswith("Client"),
+            )
+
+            role = account_type.replace(" ", "_").lower()
+            domain = "*"
+
+            added: bool = enforcer.add_role_for_user_in_domain(
+                userEmail,
+                role,
+                domain,
+            )
+            if not added:
+                raise HTTPException(status_code=500, detail="Role assignment failed")
+            request.app.state.casbin_watcher.update()
+
         digest_b64 = data.get("digest")
         salt_b64 = data.get("salt")
         params_b64 = data.get("kdfParams")
@@ -2555,7 +2910,7 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
         )
 
         jti = str(uuid4())
-        exp_dt = datetime.now(timezone.utc) + timedelta(hours=72)
+        exp_dt = datetime.now(timezone.utc) + timedelta(minutes=60)
         await conn.execute(
             "INSERT INTO jwt_token (jti, user_email, expires_at, revoked) VALUES ($1,$2,$3,FALSE)",
             jti,
@@ -2601,7 +2956,7 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
             samesite="none",
             domain="localhost",
             path="/",
-            max_age=60 * 60,
+            max_age=60 * 60 * 24,
         )
 
         request.app.state.casbin_watcher.update()
@@ -2616,7 +2971,7 @@ async def getRecoveryParams(email: str, conn: Connection = Depends(get_conn)):
         SELECT u.id, p.salt, p.kdf_params
           FROM "user" u
           JOIN user_recovery_params p ON p.user_email = u.email
-         WHERE u.email=$1 AND u.is_deleted=FALSE
+         WHERE u.email=$1 
         """,
         email,
     )
@@ -2659,8 +3014,10 @@ async def updateClientKey(request: Request, data: dict = Depends(decryptPayload(
 
 
 @app.post("/auth/complete-onboarding")
-async def completeOnboarding(payload: dict = Body(), conn: Connection = Depends(get_conn),
-                             enforcer: SyncedEnforcer = Depends(getEnforcer)):
+async def completeOnboarding(request: Request, payload: dict = Depends(decryptPayload()),
+                             conn: Connection = Depends(get_conn),
+                             enforcer: SyncedEnforcer = Depends(getEnforcer),
+                             user: SimpleUser = Depends(getCurrentUser)):
     userId = payload.get("userId")
     if not userId or not isUUIDv4(userId):
         raise HTTPException(status_code=400, detail="Invalid userId")
@@ -2668,7 +3025,10 @@ async def completeOnboarding(payload: dict = Body(), conn: Connection = Depends(
         "UPDATE \"user\" SET onboarding_done=TRUE WHERE id=$1",
         userId,
     )
-    return {"status": "ok"}
+    resp_payload = {"status": "ok"}
+    if user:
+        resp_payload = await encryptForUser(resp_payload, user.email, conn, request.app)
+    return resp_payload
 
 
 @app.post("/auth/revoke")
@@ -2708,7 +3068,7 @@ async def refreshSession(request: Request, conn: Connection = Depends(get_conn))
     redis = request.app.state.redis
     if not await redis.sismember("active_jtis", jti):
         raise HTTPException(status_code=401, detail="revoked")
-    exp_dt = datetime.now(timezone.utc) + timedelta(minutes=5)
+    exp_dt = datetime.now(timezone.utc) + timedelta(minutes=60)
     await conn.execute("UPDATE jwt_token SET expires_at=$1 WHERE jti=$2", exp_dt, jti)
     session_token = jwt.encode({"sub": email, "jti": jti, "exp": exp_dt}, SECRET_KEY, algorithm="HS256")
     resp = JSONResponse({"status": "ok"})
@@ -2720,7 +3080,7 @@ async def refreshSession(request: Request, conn: Connection = Depends(get_conn))
         samesite="none",
         domain="localhost",
         path="/",
-        max_age=60 * 60,
+        max_age=60 * 60 * 24,
     )
 
     return resp

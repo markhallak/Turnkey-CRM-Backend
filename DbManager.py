@@ -14,6 +14,7 @@ GRANT ALL ON SCHEMA public TO public;
 EXTENSIONS = """
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS citext;
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -28,7 +29,9 @@ CREATE TABLE IF NOT EXISTS casbin_rule (
   domain VARCHAR(100) NOT NULL,
   object VARCHAR(100) NOT NULL,
   action VARCHAR(100) NOT NULL,
-  extra VARCHAR(100)
+  extra VARCHAR(100),
+  is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+  deleted_at TIMESTAMPTZ
 );
 """
 
@@ -67,9 +70,9 @@ CREATE TABLE IF NOT EXISTS client (
   city                        VARCHAR(255) NOT NULL,
   state_id                    UUID         NOT NULL REFERENCES state(id)         ON UPDATE CASCADE ON DELETE RESTRICT,
   zip_code                    VARCHAR(255) NOT NULL,
-  general_onboarding_email    VARCHAR(255) NOT NULL,
+  general_onboarding_email    CITEXT       NOT NULL,
   phone_number_main_line      VARCHAR(255) NOT NULL,
-  accounting_email            VARCHAR(255) NOT NULL,
+  accounting_email            CITEXT       NOT NULL,
   accounting_phone_number     VARCHAR(255) NOT NULL,
   pay_terms                   VARCHAR(255) NOT NULL,
   trip_rate                   INT          NOT NULL,
@@ -114,7 +117,7 @@ CREATE TABLE IF NOT EXISTS client_rate (
 USER = """
 CREATE TABLE IF NOT EXISTS "user" (
   id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-  email      VARCHAR(255) NOT NULL UNIQUE,
+  email      CITEXT       NOT NULL UNIQUE,
   first_name VARCHAR(255) NOT NULL,
   last_name  VARCHAR(255) NOT NULL,
   hex_color  VARCHAR(7)   CHECK (hex_color ~ '^#[0-9A-Fa-f]{6}$'),
@@ -138,7 +141,7 @@ CREATE TABLE IF NOT EXISTS "user" (
 PROJECT = """
 CREATE TABLE IF NOT EXISTS project (
   id                    UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-  client_id             UUID         NOT NULL REFERENCES "user"(id)            ON UPDATE CASCADE ON DELETE RESTRICT,
+  client_id             UUID         NOT NULL REFERENCES client(id)            ON UPDATE CASCADE ON DELETE RESTRICT,
   priority_id           UUID         NOT NULL REFERENCES project_priority(id) ON UPDATE CASCADE ON DELETE RESTRICT,
   type_id               UUID         NOT NULL REFERENCES project_type(id)     ON UPDATE CASCADE ON DELETE RESTRICT,
   address               VARCHAR(255) NOT NULL,
@@ -292,8 +295,10 @@ MESSAGE_MENTION = """
 CREATE TABLE IF NOT EXISTS message_mention (
   id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
   message_id  UUID         NOT NULL REFERENCES message(id) ON DELETE CASCADE,
-  user_email  VARCHAR(255)         NOT NULL REFERENCES "user"(email)    ON DELETE CASCADE,
+  user_email  CITEXT       NOT NULL REFERENCES "user"(email)    ON DELETE CASCADE,
   created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  is_deleted  BOOLEAN      NOT NULL DEFAULT FALSE,
+  deleted_at  TIMESTAMPTZ,
   UNIQUE(message_id, user_email)
 );
 """
@@ -305,13 +310,15 @@ CREATE TABLE IF NOT EXISTS message_mention (
 MAGIC_LINK = """
 CREATE TABLE IF NOT EXISTS magic_link (
   uuid           UUID        PRIMARY KEY,
-  user_email     VARCHAR(255) NOT NULL,
+  user_email     CITEXT       NOT NULL,
   token          TEXT        NOT NULL,
   expires_at     TIMESTAMPTZ NOT NULL,
   consumed       BOOLEAN     NOT NULL DEFAULT FALSE,
   purpose        VARCHAR(32) NOT NULL,
   is_sent        BOOLEAN     NOT NULL DEFAULT FALSE,
-  send_to        VARCHAR(255) NOT NULL
+  send_to        CITEXT       NOT NULL,
+  is_deleted     BOOLEAN      NOT NULL DEFAULT FALSE,
+  deleted_at     TIMESTAMPTZ
 );
 """
 
@@ -338,7 +345,7 @@ CREATE TRIGGER trg_new_magic_link_row
 
 CLIENT_PASSWORD = """
 CREATE TABLE IF NOT EXISTS client_password (
-  user_email               VARCHAR(255)        PRIMARY KEY
+  user_email               CITEXT        PRIMARY KEY
     REFERENCES "user"(email) ON DELETE CASCADE,
   client_id             UUID        NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE CASCADE,
   encrypted_password    BYTEA       NOT NULL,
@@ -346,31 +353,37 @@ CREATE TABLE IF NOT EXISTS client_password (
   salt                  BYTEA       NOT NULL,
   kdf_params            JSONB       NOT NULL,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  is_deleted            BOOLEAN     NOT NULL DEFAULT FALSE,
+  deleted_at            TIMESTAMPTZ
 );
 """
 
 # Parameters used for user recovery phrase KDF
 USER_RECOVERY_PARAMS = """
 CREATE TABLE IF NOT EXISTS user_recovery_params (
-  user_email    VARCHAR(255)        PRIMARY KEY
+  user_email    CITEXT        PRIMARY KEY
     REFERENCES "user"(email) ON DELETE CASCADE,
   iv         BYTEA       NOT NULL,
   salt       BYTEA       NOT NULL,
   kdf_params JSONB       NOT NULL,
   digest     BYTEA       NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  is_deleted BOOLEAN     NOT NULL DEFAULT FALSE,
+  deleted_at TIMESTAMPTZ
 );
 """
 
 # 11: USER_KEY
 USER_KEY = """
 CREATE TABLE IF NOT EXISTS user_key (
-  user_email  VARCHAR(255)    NOT NULL REFERENCES "user"(email) ON DELETE CASCADE,
+  user_email  CITEXT    NOT NULL REFERENCES "user"(email) ON DELETE CASCADE,
   purpose  VARCHAR(16) NOT NULL,
   public_key BYTEA NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+  deleted_at TIMESTAMPTZ,
   PRIMARY KEY (user_email, purpose)
 );
 """
@@ -378,9 +391,11 @@ CREATE TABLE IF NOT EXISTS user_key (
 JWT_TOKEN = """
 CREATE TABLE IF NOT EXISTS jwt_token (
   jti UUID PRIMARY KEY,
-  user_email VARCHAR(255) NOT NULL,
+  user_email CITEXT NOT NULL,
   expires_at TIMESTAMPTZ NOT NULL,
-  revoked BOOLEAN NOT NULL DEFAULT FALSE
+  revoked BOOLEAN NOT NULL DEFAULT FALSE,
+  is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+  deleted_at TIMESTAMPTZ
 );
 """
 
@@ -423,10 +438,12 @@ NOTIFICATION = """
 CREATE TABLE IF NOT EXISTS notification (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   triggered_by_category VARCHAR(100) NOT NULL,
-  triggered_by_user VARCHAR(255),
+  triggered_by_user CITEXT,
   content TEXT NOT NULL,
   isProcessed BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+  deleted_at TIMESTAMPTZ
 );
 """
 
@@ -471,10 +488,10 @@ CREATE TABLE IF NOT EXISTS client_onboarding_general (
 CREATE TABLE IF NOT EXISTS client_onboarding_service (
   id                          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id                   UUID         NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE RESTRICT,
-  coverage_area               TEXT         COMMENT 'Comma-separated list of cities',
+  coverage_area               TEXT,
   admin_staff_count           INT,
   field_staff_count           INT,
-  licenses                    TEXT         COMMENT 'List of licenses',
+  licenses                    TEXT,
   working_hours               VARCHAR(100),
   covers_after_hours          BOOLEAN      NOT NULL DEFAULT FALSE,
   covers_weekend_calls        BOOLEAN      NOT NULL DEFAULT FALSE,
@@ -490,8 +507,8 @@ CREATE TABLE IF NOT EXISTS client_onboarding_contact (
   dispatch_supervisor         VARCHAR(255),
   field_supervisor            VARCHAR(255),
   management_supervisor       VARCHAR(255),
-  regular_hours_contact       VARCHAR(255) COMMENT 'Email & phone during regular hours',
-  emergency_hours_contact     VARCHAR(255) COMMENT 'Email & phone during emergencies',
+  regular_hours_contact       VARCHAR(255),
+  emergency_hours_contact     VARCHAR(255),
   created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
   updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
   is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
@@ -501,8 +518,8 @@ CREATE TABLE IF NOT EXISTS client_onboarding_contact (
 CREATE TABLE IF NOT EXISTS client_onboarding_load (
   id                          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id                   UUID         NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE RESTRICT,
-  avg_monthly_tickets_last4   INT          COMMENT 'Average over last 4 months',
-  po_source_split             TEXT         COMMENT 'e.g. "30% Res, 50% Com, 20% Ind"',
+  avg_monthly_tickets_last4   INT,
+  po_source_split             TEXT,
   monthly_po_capacity         INT,
   created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
   updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -541,12 +558,24 @@ CREATE TABLE IF NOT EXISTS client_references (
   client_id                   UUID         NOT NULL REFERENCES client(id) ON UPDATE CASCADE ON DELETE CASCADE,
   company_name                VARCHAR(255),
   contact_name                VARCHAR(255),
-  contact_email               VARCHAR(255),
+  contact_email               CITEXT,
   contact_phone               VARCHAR(50),
   created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
   updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
   is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
   deleted_at                  TIMESTAMPTZ
+);
+"""
+
+# Mapping of account managers to clients
+ACCOUNT_MANAGER_CLIENT = """
+CREATE TABLE IF NOT EXISTS account_manager_client (
+  account_manager_email CITEXT NOT NULL REFERENCES "user"(email) ON DELETE CASCADE,
+  client_id UUID NOT NULL REFERENCES client(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+  deleted_at TIMESTAMPTZ,
+  PRIMARY KEY (account_manager_email, client_id)
 );
 """
 
@@ -687,6 +716,10 @@ CREATE INDEX IF NOT EXISTS idx_msg_sender       ON message(sender_id);
 CREATE INDEX IF NOT EXISTS idx_msg_project      ON message(project_id);
 CREATE INDEX IF NOT EXISTS idx_msg_attachment   ON message(file_attachment_id);
 CREATE INDEX IF NOT EXISTS idx_doc_project      ON document(project_id);
+CREATE INDEX IF NOT EXISTS idx_msg_mention_user   ON message_mention(user_email) WHERE is_deleted = FALSE;
+CREATE INDEX IF NOT EXISTS idx_magiclink_email    ON magic_link(user_email)      WHERE is_deleted = FALSE;
+CREATE INDEX IF NOT EXISTS idx_jwt_user           ON jwt_token(user_email)       WHERE is_deleted = FALSE;
+CREATE INDEX IF NOT EXISTS idx_casbin_subject_dom ON casbin_rule(subject, domain) WHERE is_deleted = FALSE;
 CREATE INDEX IF NOT EXISTS idx_notification_cursor ON notification (created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_status_proj_category_deleted_value ON status (category, is_deleted, value);
 CREATE INDEX IF NOT EXISTS idx_project_trade_deleted_value ON project_trade (is_deleted, value);
@@ -706,6 +739,16 @@ CREATE INDEX IF NOT EXISTS idx_document_search_text  ON document  USING GIN (sea
 CREATE INDEX IF NOT EXISTS idx_quote_search_text     ON quote     USING GIN (search_text gin_trgm_ops) WHERE is_deleted = FALSE;
 CREATE INDEX IF NOT EXISTS idx_invoice_search_text   ON invoice   USING GIN (search_text gin_trgm_ops) WHERE is_deleted = FALSE;
 CREATE INDEX IF NOT EXISTS idx_message_search_text   ON message   USING GIN (search_text gin_trgm_ops) WHERE is_deleted = FALSE;
+"""
+
+# Comments for onboarding tables
+COMMENTS = """
+COMMENT ON COLUMN client_onboarding_service.coverage_area IS 'Comma-separated list of cities';
+COMMENT ON COLUMN client_onboarding_service.licenses IS 'List of licenses';
+COMMENT ON COLUMN client_onboarding_contact.regular_hours_contact IS 'Email & phone during regular hours';
+COMMENT ON COLUMN client_onboarding_contact.emergency_hours_contact IS 'Email & phone during emergencies';
+COMMENT ON COLUMN client_onboarding_load.avg_monthly_tickets_last4 IS 'Average over last 4 months';
+COMMENT ON COLUMN client_onboarding_load.po_source_split IS 'e.g. "30% Res, 50% Com, 20% Ind"';
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -910,6 +953,7 @@ async def create_tables():
             ("client", CLIENT),
             ("client_rate", CLIENT_RATE),
             ("user", USER),
+            ("account_manager_client", ACCOUNT_MANAGER_CLIENT),
             ("project_priority", PROJECT_PRIORITY),
             ("project_type", PROJECTS_TYPE),
             ("project_trade", PROJECTS_TRADE),
@@ -932,6 +976,7 @@ async def create_tables():
             ("views", VIEWS),
             ("prepares", PREPARES),
             ("indices", INDICES),
+            ("comments", COMMENTS),
             ("functions", FUNCTIONS),
             ("triggers", TRIGGERS),
         ]:

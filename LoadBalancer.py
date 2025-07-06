@@ -10,7 +10,6 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
-from httpx import StreamClosed
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
@@ -19,7 +18,7 @@ BACKENDS_FILE = "backends.json"
 class Server(BaseModel):
     url: str
 
-# ——— configure our logger ———
+# ——— Logging Configuration ———
 formatter = logging.Formatter(
     "%(asctime)s %(levelname)s %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
@@ -30,14 +29,14 @@ logger = logging.getLogger("loadbalancer")
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
-# ——— in-memory state ———
+# ——— In-memory state ———
 backends: list[str] = []
 queue_counts: dict[str, int] = {}
 health_status: dict[str, bool] = {}
 lock = asyncio.Lock()
 client = httpx.AsyncClient(timeout=None)
 
-# ——— persistence helpers ———
+# ——— Persistence Helpers ———
 async def load_backends() -> list[str]:
     try:
         async with aiofiles.open(BACKENDS_FILE, "r") as f:
@@ -52,7 +51,7 @@ async def save_backends(backends: list[str]) -> None:
         await f.write(json.dumps({"backends": backends}, indent=2))
     logger.info(f"Persisted backends: {backends}")
 
-# ——— health-check loop ———
+# ——— Periodic Health-Check ———
 async def health_check_loop() -> None:
     while True:
         async with lock:
@@ -68,28 +67,31 @@ async def health_check_loop() -> None:
                 health_status[url] = ok
         await asyncio.sleep(5)
 
-# ——— lifespan to start/stop health-checker ———
+# ——— Application Lifespan ———
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     loaded = await load_backends()
     backends.extend(loaded)
-    for u in backends:
-        queue_counts[u] = 0
-        health_status[u] = False
+    for url in backends:
+        queue_counts[url] = 0
+        health_status[url] = False
+
     logger.info(f"Starting health check for backends: {backends}")
-    task = asyncio.create_task(health_check_loop())
-    yield
-    logger.info("Shutting down health check and HTTP client")
-    task.cancel()
+    health_task = asyncio.create_task(health_check_loop())
+
+    yield  # ← app runs here
+
+    logger.info("Shutting down health check task and HTTP client")
+    health_task.cancel()
     try:
-        await task
+        await health_task
     except asyncio.CancelledError:
         pass
     await client.aclose()
 
 app = FastAPI(lifespan=lifespan)
 
-# ——— management APIs ———
+# ——— Management Endpoints ———
 @app.post("/servers")
 async def add_server(server: Server):
     async with lock:
@@ -122,68 +124,61 @@ async def list_queue_lengths():
     async with lock:
         return {"queue_lengths": queue_counts, "health": health_status}
 
-# ——— the proxy middleware ———
+# ——— Load-Balancer Middleware ———
 @app.middleware("http")
 async def load_balancer(request: Request, call_next):
     client_ip = request.client.host if request.client else "-"
     path = request.url.path
 
-    # helper that wraps the upstream stream
-    async def proxy_streamer(upstream: httpx.Response):
-        try:
-            async for chunk in upstream.aiter_bytes():
-                yield chunk
-        except StreamClosed:
-            logger.info("Upstream closed stream early; ending proxy")
-
-    # bypass our own endpoints
+    # 1) Bypass management endpoints
     if path.startswith("/servers") or path == "/queue-lengths":
         return await call_next(request)
 
-    # pick the least-loaded healthy backend
+    # 2) Pick least-loaded healthy backend
     async with lock:
         available = [u for u in backends if health_status.get(u)]
         if not available:
             logger.error(f"{client_ip} -> No available backends for {path}")
-            raise HTTPException(503, "No available backends")
+            raise HTTPException(status_code=503, detail="No available backends")
         target = min(available, key=lambda u: queue_counts[u])
         queue_counts[target] += 1
 
     logger.info(f"{client_ip} -> {request.method} {path} ➔ {target}")
 
-    # attempt with retries
+    # 3) Construct upstream URL properly
+    qs = request.url.query
+    upstream_url = target + path + (f"?{qs}" if qs else "")
+
+    # 4) Proxy with retries and manual stream-manager enter/exit
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         try:
-            async with client.stream(
+            # Create, but don’t “await” the async-context manager
+            manager = client.stream(
                 request.method,
-                f"{target}{request.url.path}?{request.url.query.encode('utf-8')}",
+                upstream_url,
                 headers=request.headers.raw,
                 content=await request.body(),
-                timeout=None,
-            ) as resp:
-                logger.info(f"Response {resp.status_code} from {target} (attempt {attempt})")
+                timeout=None
+            )
 
-                # strip hop-by-hop headers to avoid content-length mismatches
-                filtered_headers = {
-                    k: v
-                    for k, v in resp.headers.items()
-                    if k.lower() not in ("content-length", "transfer-encoding", "connection")
-                }
+            # Manually enter to get the Response
+            resp = await manager.__aenter__()
+            logger.info(f"Response {resp.status_code} from {target} (attempt {attempt})")
 
-                return StreamingResponse(
-                    proxy_streamer(resp),
-                    status_code=resp.status_code,
-                    headers=filtered_headers,
-                    media_type=resp.headers.get("content-type"),
-                    background=BackgroundTask(resp.aclose),
-                )
+            # Return a StreamingResponse that will close the manager in background
+            return StreamingResponse(
+                resp.aiter_bytes(),
+                status_code=resp.status_code,
+                headers=resp.headers,
+                background=BackgroundTask(manager.__aexit__, None, None, None)
+            )
 
         except httpx.RequestError as e:
-            logger.warning(f"Attempt {attempt} to {target} failed: {e}")
+            logger.warning(f"Attempt {attempt} to {upstream_url} failed: {e}")
             if attempt == max_retries:
-                logger.error(f"All {max_retries} attempts to {target} failed")
-                raise HTTPException(502, str(e))
+                logger.error(f"All {max_retries} attempts failed for {client_ip} -> {path}")
+                raise HTTPException(status_code=502, detail=str(e))
             await asyncio.sleep(1)
 
         finally:
@@ -191,4 +186,4 @@ async def load_balancer(request: Request, call_next):
                 queue_counts[target] -= 1
 
 if __name__ == "__main__":
-    uvicorn.run("LoadBalancer:app", host="0.0.0.0", port=8100, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=8100, log_level="info")
