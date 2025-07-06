@@ -741,15 +741,6 @@ CREATE INDEX IF NOT EXISTS idx_invoice_search_text   ON invoice   USING GIN (sea
 CREATE INDEX IF NOT EXISTS idx_message_search_text   ON message   USING GIN (search_text gin_trgm_ops) WHERE is_deleted = FALSE;
 """
 
-# Comments for onboarding tables
-COMMENTS = """
-COMMENT ON COLUMN client_onboarding_service.coverage_area IS 'Comma-separated list of cities';
-COMMENT ON COLUMN client_onboarding_service.licenses IS 'List of licenses';
-COMMENT ON COLUMN client_onboarding_contact.regular_hours_contact IS 'Email & phone during regular hours';
-COMMENT ON COLUMN client_onboarding_contact.emergency_hours_contact IS 'Email & phone during emergencies';
-COMMENT ON COLUMN client_onboarding_load.avg_monthly_tickets_last4 IS 'Average over last 4 months';
-COMMENT ON COLUMN client_onboarding_load.po_source_split IS 'e.g. "30% Res, 50% Com, 20% Ind"';
-"""
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 18: FUNCTIONS
@@ -976,35 +967,12 @@ async def create_tables():
             ("views", VIEWS),
             ("prepares", PREPARES),
             ("indices", INDICES),
-            ("comments", COMMENTS),
             ("functions", FUNCTIONS),
             ("triggers", TRIGGERS),
         ]:
             await execute_block(conn, name, sql)
 
         if await conn.fetchval("SELECT count(*) FROM casbin_rule") == 0:
-            await conn.fetchval(
-                """
-                INSERT INTO "user" (
-                  email,
-                  first_name,
-                  last_name,
-                  hex_color,
-                  client_id,
-                  is_active,
-                  is_client
-                ) VALUES (
-                  'test@gmail.com',
-                  'Mark',
-                  'Hallak',
-                  '#FF0000',
-                  NULL,
-                  TRUE,
-                  FALSE
-                );
-                """
-            )
-
             await conn.executemany(
                 """
                 INSERT INTO casbin_rule (ptype, subject, domain, object, action)
