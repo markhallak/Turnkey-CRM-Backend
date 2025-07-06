@@ -100,6 +100,16 @@ async def authorize(request: Request, user: SimpleUser = Depends(getCurrentUser)
         if not user:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthenticated")
 
+        token = request.cookies.get("session")
+        if token:
+            try:
+                data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"], options={"verify_exp": False})
+                jti = data.get("jti")
+                if jti and await request.app.state.redis.sismember("blacklisted_jtis", jti):
+                    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="revoked")
+            except Exception:
+                pass
+
         if not user.setup_done and path != "/set-recovery-phrase":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="set-recovery-phrase")
 
@@ -435,7 +445,7 @@ async def validateLoginToken(
 
     next_payload = {
         "next_step": "/dashboard",
-        "exp": int((datetime.now(timezone.utc) + timedelta(minutes=(60 * 60 * 72))).timestamp()),
+        "exp": int((datetime.now(timezone.utc) + timedelta(minutes=(60 * 24))).timestamp()),
     }
     nav_token = generateJwtRs256(next_payload, request.app.state.privateKey)
     session_token = jwt.encode({"sub": userEmail, "jti": jti, "exp": exp_dt}, SECRET_KEY, algorithm="HS256")
@@ -448,7 +458,7 @@ async def validateLoginToken(
         samesite="none",
         domain="localhost",
         path="/",
-        max_age=60 * 30,
+        max_age=60 * 60,
     )
 
     return response
@@ -2591,7 +2601,7 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
             samesite="none",
             domain="localhost",
             path="/",
-            max_age=60 * 30,
+            max_age=60 * 60,
         )
 
         request.app.state.casbin_watcher.update()
@@ -2710,7 +2720,7 @@ async def refreshSession(request: Request, conn: Connection = Depends(get_conn))
         samesite="none",
         domain="localhost",
         path="/",
-        max_age=60 * 30,
+        max_age=60 * 60,
     )
 
     return resp
@@ -2736,7 +2746,7 @@ async def unblacklistUser(email: str = Body(..., embed=True), request: Request =
     return {"status": "ok"}
 
 
-@app.post("/connection-test")
+@app.get("/connection-test")
 async def connectionTest():
     return {"status": "ok"}
 

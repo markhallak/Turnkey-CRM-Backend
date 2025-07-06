@@ -305,7 +305,7 @@ CREATE TABLE IF NOT EXISTS message_mention (
 MAGIC_LINK = """
 CREATE TABLE IF NOT EXISTS magic_link (
   uuid           UUID        PRIMARY KEY,
-  user_email     VARCHAR(255)        REFERENCES "user"(email),
+  user_email     VARCHAR(255) NOT NULL,
   token          TEXT        NOT NULL,
   expires_at     TIMESTAMPTZ NOT NULL,
   consumed       BOOLEAN     NOT NULL DEFAULT FALSE,
@@ -981,8 +981,6 @@ async def create_tables():
                     ("p", "client_technician", "*", "/projects", "read_without_financial"),
                     ("p", "client_technician", "*", "/projects/view/*", "read_without_financial"),
                     ("p", "client_technician", "*", "/get-messages", "*"),
-
-                    ("g", "test@gmail.com", "employee_admin", "*", "")
                 ]
             )
 
