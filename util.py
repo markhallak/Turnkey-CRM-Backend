@@ -21,16 +21,36 @@ async def createMagicLink(
         private_key_pem: str,
         purpose: str,
         recipientEmail: str,
+        firstName: str,
+        lastName: str,
+        accountType: str,
         ttlHours: int = 24,
 ) -> str:
     new_uuid = uuid4()
     expires_at = datetime.now(timezone.utc) + timedelta(hours=ttlHours)
-    payload = {
-        "uuid": str(new_uuid),
-        "userEmail": recipientEmail,
-        "next_step": "set-recovery-phrase",
-        "exp": int(expires_at.timestamp()),
-    }
+
+    if purpose == "signup":
+        if not firstName or len(firstName) == 0:
+            raise Exception("First Name is empty")
+        if not lastName or len(lastName) == 0:
+            raise Exception("Last Name is empty")
+
+        payload = {
+            "uuid": str(new_uuid),
+            "userEmail": recipientEmail,
+            "firstName": firstName,
+            "lastName": lastName,
+            "accountType": accountType,
+            "next_step": "set-recovery-phrase",
+            "exp": int(expires_at.timestamp()),
+        }
+    else:
+        payload = {
+            "uuid": str(new_uuid),
+            "userEmail": recipientEmail,
+            "next_step": "dashboard",
+            "exp": int(expires_at.timestamp()),
+        }
     token = generateJwtRs256(payload, private_key_pem)
 
     sql = """

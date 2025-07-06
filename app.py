@@ -3,7 +3,6 @@ import base64
 import json
 import os
 import random
-import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
@@ -15,7 +14,8 @@ import jwt
 import nacl.bindings
 import uvicorn
 from asyncpg import create_pool, Pool, Connection
-from casbin import SyncedEnforcer
+from casbin import SyncedEnforcer, AsyncEnforcer
+from casbin_async_sqlalchemy_adapter import Adapter
 from casbin_redis_watcher import new_watcher, WatcherOptions
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from databases import Database
@@ -24,16 +24,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import Table, Column, Integer, String, MetaData
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.orm import declarative_base
 
-from CasbinAdapter import CasbinAdapter
 from constants import ASYNCPG_URL, SECRET_KEY, REDIS_URL, KMS_URL
 from util import isUUIDv4, createMagicLink, generateJwtRs256, decodeJwtRs256
 
 
 class SimpleUser:
-    def __init__(self, id: UUID, email: str, setup_done: bool, onboarding_done: bool, is_client: bool):
+    def __init__(self, id: UUID, email: str, first_name: str, last_name: str, setup_done: bool, onboarding_done: bool, is_client: bool):
         self.id = id
         self.email = email
+        self.firstName = first_name
+        self.lastName = last_name
         self.setup_done = setup_done
         self.onboarding_done = onboarding_done
         self.is_client = is_client
@@ -41,6 +44,7 @@ class SimpleUser:
 
 async def getCurrentUser(request: Request) -> SimpleUser | None:
     token = request.cookies.get("session")
+
     if not token:
         return None
     try:
@@ -61,13 +65,15 @@ async def getCurrentUser(request: Request) -> SimpleUser | None:
 
     async with request.app.state.db_pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, has_set_recovery_phrase, onboarding_done, is_client FROM \"user\" WHERE email=$1",
+            "SELECT id, first_name, last_name, has_set_recovery_phrase, onboarding_done, is_client FROM \"user\" WHERE email=$1",
             email,
         )
         if row:
             return SimpleUser(
                 row["id"],
                 email,
+                row["first_name"],
+                row["last_name"],
                 row["has_set_recovery_phrase"],
                 row["onboarding_done"],
                 row["is_client"],
@@ -96,6 +102,7 @@ async def authorize(request: Request, user: SimpleUser = Depends(getCurrentUser)
             and not path.startswith("/auth/me")
             and not path.startswith("/auth/set-recovery-phrase")
             and not path.startswith("/auth/refresh-session")
+            and not path.startswith("/connection-test")
     ):
         if not user:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthenticated")
@@ -117,16 +124,20 @@ async def authorize(request: Request, user: SimpleUser = Depends(getCurrentUser)
             if user.is_client:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="onboarding")
 
-        perms = enforcer.get_policy()  # [[sub, dom, obj, act], …]
+        perms = await enforcer.get_policy()  # [[sub, dom, obj, act], …]
 
         # 2. every “g” (role-mapping) rule it knows
-        groups = enforcer.get_grouping_policy()  # [[sub, role, dom], …]
+        groups = await enforcer.get_grouping_policy()  # [[sub, role, dom], …]
 
         # 3. the roles this particular user has in the “*” domain
-        roles = enforcer.get_roles_for_user_in_domain(user.email, "*")
+        roles = await enforcer.get_roles_for_user_in_domain(user.email, "*")
 
         # 4. all permissions this user already enjoys
-        user_perms = enforcer.get_permissions_for_user(user.email)
+        user_perms = await enforcer.get_permissions_for_user(user.email)
+        print("PERMS: ", perms)
+        print("GROUPS: ", groups)
+        print("ROLES: ", roles)
+        print("USER PERMS: ", user_perms)
 
         sub = str(user.email)
         domain = "*"
@@ -210,37 +221,44 @@ async def encryptForUser(data: dict, email: str, conn: Connection, app: FastAPI)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # startup logic
-    metadata = MetaData()
-    casbin_rule = Table(
-        "casbin_rule", metadata,
-        Column("id", Integer, primary_key=True),
-        Column("ptype", String(100), nullable=False),
-        Column("subject", String(255), nullable=False),
-        Column("domain", String(255), nullable=False),
-        Column("object", String(255), nullable=False),
-        Column("action", String(255), nullable=False),
-        Column("extra", String(255)),
+    async_url = ASYNCPG_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+    engine = create_async_engine(
+        async_url,
+        pool_size=5,
     )
-    db = Database(ASYNCPG_URL)
-    await db.connect()
 
-    adapter = CasbinAdapter(db=db, table=casbin_rule)
-    enforcer = SyncedEnforcer("model.conf", adapter)
+    Base = declarative_base()
+
+    class CasbinRule(Base):
+        __tablename__ = "casbin_rule"  # ← exactly the table already in Postgres
+        id = Column(Integer, primary_key=True)
+        ptype = Column(String(100), nullable=False)
+        v0 = Column(String(255))
+        v1 = Column(String(255))
+        v2 = Column(String(255))
+        v3 = Column(String(255))
+        v4 = Column(String(255))
+        v5 = Column(String(255))
+
+    adapter = Adapter(engine, db_class=CasbinRule)
+    enforcer = AsyncEnforcer("model.conf", adapter)
     enforcer.enable_auto_save(True)
+    await enforcer.load_policy()
+    enforcer.build_role_links()
+
     opts = WatcherOptions()
     opts.host = "localhost"
     opts.port = "6379"
     watcher = new_watcher(opts)
-    watcher.set_update_callback(lambda msg: asyncio.create_task(enforcer.load_policy()))
+    loop = asyncio.get_running_loop()
+    watcher.set_update_callback(lambda _: asyncio.run_coroutine_threadsafe(
+        enforcer.load_policy(), loop
+    ))
     enforcer.set_watcher(watcher)
 
-    await adapter.load_policy(enforcer.get_model())
-    enforcer.build_role_links()
     app.state.casbin_watcher = watcher
     app.state.enforcer = enforcer
 
-    loop = asyncio.get_running_loop()
     app.state.db_pool: Pool = await create_pool(
         dsn=ASYNCPG_URL, min_size=5, max_size=20
     )
@@ -318,15 +336,6 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(refreshKeys())
 
-    def _update(_msg: str):
-        loop.call_soon_threadsafe(enforcer.load_policy)
-
-    def _on_change(_msg: str):
-        asyncio.create_task(adapter.load_policy(enforcer.get_model()))
-
-    watcher.set_update_callback(_on_change)
-    watcher.set_update_callback(_update)
-
     try:
         yield
     finally:
@@ -379,6 +388,8 @@ async def whoami(user: SimpleUser = Depends(getCurrentUser)):
 
     return {
         "email": user.email,
+        "firstName": user.firstName,
+        "lastName": user.lastName,
         "setup_done": user.setup_done,
         "onboarding_done": user.onboarding_done,
         "is_client": user.is_client
@@ -412,6 +423,9 @@ async def validateSignupToken(request: Request, data: dict = Depends(decryptPayl
 
     return {
         "userEmail": payload.get("userEmail"),
+        "firstName": payload.get("firstName"),
+        "lastName": payload.get("lastName"),
+        "accountType": payload.get("accountType"),
     }
 
 
@@ -420,7 +434,6 @@ async def validateLoginToken(
         request: Request,
         data: dict = Depends(decryptPayload()),
         conn: Connection = Depends(get_conn),
-        enforcer: SyncedEnforcer = Depends(getEnforcer),
 ):
     token_str = data.get("token")
     try:
@@ -1218,7 +1231,7 @@ async def fetchProject(
         raise HTTPException(status_code=500, detail=str(e))
 
     project = dict(row)
-    roles = enforcer.get_roles_for_user_in_domain(user.email, "*") if user else []
+    roles = await enforcer.get_roles_for_user_in_domain(user.email, "*") if user else []
     if "client_technician" in roles:
         project.pop("nte", None)
 
@@ -2660,24 +2673,26 @@ async def updateInsuranceData(
 async def inviteUser(
         request: Request,
         data: dict = Depends(decryptPayload()),
-        conn: Connection = Depends(get_conn),
-        enforcer: SyncedEnforcer = Depends(getEnforcer)
+        conn: Connection = Depends(get_conn)
 ):
-    email_to_invite = data.get("emailToInvite")
-    account_type = data.get("accountType")
-    first_name = data.get("firstName", "")
-    last_name = data.get("lastName", "")
+    emailToInvite = data.get("emailToInvite")
+    accountType = data.get("accountType")
+    firstName = data.get("firstName", "")
+    lastName = data.get("lastName", "")
 
-    if not email_to_invite:
+    if not emailToInvite:
         raise HTTPException(status_code=400, detail="Invalid email")
-    if not account_type:
+    if not accountType:
         raise HTTPException(status_code=400, detail="Invalid account type")
 
     await createMagicLink(
         conn,
         request.app.state.privateKey,
         purpose="signup",
-        recipientEmail=email_to_invite,
+        recipientEmail=emailToInvite,
+        firstName=firstName,
+        lastName=lastName,
+        accountType=accountType,
         ttlHours=24,
     )
 
@@ -2685,7 +2700,7 @@ async def inviteUser(
 
 
 @app.put("/update-user")
-async def updateUser(request: Request, payload: dict = Body(), conn: Connection = Depends(get_conn)):
+async def updateUser(request: Request, payload: dict = Body(), conn: Connection = Depends(get_conn), enforcer: SyncedEnforcer = Depends(getEnforcer)):
     user_id = payload.get("userId")
     if not user_id or not await isUUIDv4(user_id):
         raise HTTPException(status_code=400, detail="Invalid userId")
@@ -2725,6 +2740,9 @@ async def updateUser(request: Request, payload: dict = Body(), conn: Connection 
             subj,
             role.replace(' ', '_').lower(),
         )
+
+        await enforcer.load_policy()
+        enforcer.build_role_links()
         request.app.state.casbin_watcher.update()
 
     return {"status": "updated"}
@@ -2812,7 +2830,10 @@ async def login(request: Request, data: dict = Depends(decryptPayload()), conn: 
         request.app.state.privateKey,
         purpose="login",
         recipientEmail=email,
-        ttlHours=1,
+        firstName="",
+        lastName="",
+        accountType="",
+        ttlHours=24,
     )
 
     return {"status": "Link will be sent shortly"}
@@ -2821,6 +2842,8 @@ async def login(request: Request, data: dict = Depends(decryptPayload()), conn: 
 @app.post("/auth/set-recovery-phrase")
 async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayload(True)),
                             conn: Connection = Depends(get_conn), enforcer: SyncedEnforcer = Depends(getEnforcer)):
+
+    print("RECOVERY-PHRASE-PAYLOAD: ", data)
     token_str = data.get("token")
     if not token_str:
         raise HTTPException(status_code=400, detail="missing token")
@@ -2842,10 +2865,11 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
 
     # When called with encrypted data, finalize recovery setup
     userEmail = data.get("userEmail")
+    print("USER EMAIL: ", userEmail)
     if userEmail:
         first_name = data.get("firstName", "")
         last_name = data.get("lastName", "")
-        account_type = data.get("accountType", "Client")
+        accountType = data.get("accountType", "")
         existing = await conn.fetchrow(
             "SELECT id FROM \"user\" WHERE email=$1 ",
             userEmail,
@@ -2859,19 +2883,24 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
                 first_name,
                 last_name,
                 hex_color,
-                account_type.startswith("Client"),
+                accountType.startswith("Client"),
             )
 
-            role = account_type.replace(" ", "_").lower()
+            role = accountType.replace(" ", "_").lower()
             domain = "*"
 
-            added: bool = enforcer.add_role_for_user_in_domain(
+            added: bool = await enforcer.add_role_for_user_in_domain(
                 userEmail,
                 role,
                 domain,
             )
+
             if not added:
                 raise HTTPException(status_code=500, detail="Role assignment failed")
+            gPolicies = enforcer.get_grouping_policy()
+            print("ALL GROUPING POLICIES:", gPolicies)
+            await enforcer.load_policy()
+            enforcer.build_role_links()
             request.app.state.casbin_watcher.update()
 
         digest_b64 = data.get("digest")
@@ -2922,13 +2951,14 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
         await redis.publish("jwt_updates", f"add:{jti}")
         await conn.execute("UPDATE magic_link SET consumed=TRUE WHERE uuid=$1", UUID(link_uuid))
 
-        roles = enforcer.get_roles_for_user_in_domain(userEmail, "*")
+        roles = await enforcer.get_roles_for_user(userEmail)
         await conn.execute(
             "UPDATE \"user\" SET is_active=TRUE, onboarding_done=$2, has_set_recovery_phrase=TRUE WHERE email=$1",
             userEmail,
             ("client_admin" in roles)
         )
-
+        print("ROLES: ", roles)
+        print("IS CLIENT: ", "client_admin" in roles)
         if "client_admin" in roles:
             next_payload = {
                 "next_step": "/onboarding",
@@ -2958,8 +2988,6 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
             path="/",
             max_age=60 * 60 * 24,
         )
-
-        request.app.state.casbin_watcher.update()
 
         return response
 
@@ -3016,7 +3044,6 @@ async def updateClientKey(request: Request, data: dict = Depends(decryptPayload(
 @app.post("/auth/complete-onboarding")
 async def completeOnboarding(request: Request, payload: dict = Depends(decryptPayload()),
                              conn: Connection = Depends(get_conn),
-                             enforcer: SyncedEnforcer = Depends(getEnforcer),
                              user: SimpleUser = Depends(getCurrentUser)):
     userId = payload.get("userId")
     if not userId or not isUUIDv4(userId):

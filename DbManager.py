@@ -22,16 +22,15 @@ CREATE EXTENSION IF NOT EXISTS citext;
 # ──────────────────────────────────────────────────────────────────────────────
 
 CASBIN_RULE = """
-CREATE TABLE IF NOT EXISTS casbin_rule (
+CREATE TABLE casbin_rule (
   id SERIAL PRIMARY KEY,
   ptype VARCHAR(100) NOT NULL,
-  subject VARCHAR(100) NOT NULL,
-  domain VARCHAR(100) NOT NULL,
-  object VARCHAR(100) NOT NULL,
-  action VARCHAR(100) NOT NULL,
-  extra VARCHAR(100),
-  is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ
+  v0   VARCHAR(255),
+  v1   VARCHAR(255),
+  v2   VARCHAR(255),
+  v3   VARCHAR(255),
+  v4   VARCHAR(255),
+  v5   VARCHAR(255)
 );
 """
 
@@ -719,7 +718,7 @@ CREATE INDEX IF NOT EXISTS idx_doc_project      ON document(project_id);
 CREATE INDEX IF NOT EXISTS idx_msg_mention_user   ON message_mention(user_email) WHERE is_deleted = FALSE;
 CREATE INDEX IF NOT EXISTS idx_magiclink_email    ON magic_link(user_email)      WHERE is_deleted = FALSE;
 CREATE INDEX IF NOT EXISTS idx_jwt_user           ON jwt_token(user_email)       WHERE is_deleted = FALSE;
-CREATE INDEX IF NOT EXISTS idx_casbin_subject_dom ON casbin_rule(subject, domain) WHERE is_deleted = FALSE;
+CREATE INDEX IF NOT EXISTS idx_casbin_subject_dom ON casbin_rule(v0, v1);
 CREATE INDEX IF NOT EXISTS idx_notification_cursor ON notification (created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_status_proj_category_deleted_value ON status (category, is_deleted, value);
 CREATE INDEX IF NOT EXISTS idx_project_trade_deleted_value ON project_trade (is_deleted, value);
@@ -975,7 +974,7 @@ async def create_tables():
         if await conn.fetchval("SELECT count(*) FROM casbin_rule") == 0:
             await conn.executemany(
                 """
-                INSERT INTO casbin_rule (ptype, subject, domain, object, action)
+                INSERT INTO casbin_rule (ptype, v0, v1, v2, v3)
                 VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT DO NOTHING;
                 """,
