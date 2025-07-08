@@ -578,6 +578,19 @@ CREATE TABLE IF NOT EXISTS account_manager_client (
 );
 """
 
+# Mapping of client admins to client technicians
+CLIENT_ADMIN_TECHNICIAN = """
+CREATE TABLE IF NOT EXISTS client_admin_technician (
+  client_admin_email CITEXT NOT NULL REFERENCES "user"(email) ON DELETE CASCADE,
+  technician_email   CITEXT NOT NULL REFERENCES "user"(email) ON DELETE CASCADE,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  is_deleted         BOOLEAN NOT NULL DEFAULT FALSE,
+  deleted_at         TIMESTAMPTZ,
+  PRIMARY KEY (client_admin_email, technician_email)
+);
+"""
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 14: ALTERS (search_text columns)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -944,6 +957,7 @@ async def create_tables():
             ("client_rate", CLIENT_RATE),
             ("user", USER),
             ("account_manager_client", ACCOUNT_MANAGER_CLIENT),
+            ("client_admin_technician", CLIENT_ADMIN_TECHNICIAN),
             ("project_priority", PROJECT_PRIORITY),
             ("project_type", PROJECTS_TYPE),
             ("project_trade", PROJECTS_TRADE),
@@ -988,11 +1002,15 @@ async def create_tables():
                     ("p", "employee_account_manager", "*", "/send-message", "*"),
 
                     ("p", "client_admin", "*", "/projects", "*"),
+                    ("p", "client_admin", "*", "/projects/*", "*"),
+                    ("p", "client_admin", "*", "/get-messages", "*"),
                     ("p", "client_admin", "*", "/send-message", "*"),
 
-                    ("p", "client_technician", "*", "/projects", "read_without_financial"),
-                    ("p", "client_technician", "*", "/projects/view/*", "read_without_financial"),
+                    ("p", "client_technician", "*", "/projects", "get"),
+                    ("p", "client_technician", "*", "/projects/view/*", "get"),
                     ("p", "client_technician", "*", "/get-messages", "*"),
+
+                    ("g", "client_technician", "client_admin", "*", ""),
                 ]
             )
 

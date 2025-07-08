@@ -22,10 +22,16 @@ INITIAL_POLICIES = [
     ("employee_account_manager","*", "/send-message","*"),
 
     ("client_admin",            "*", "/projects",    "*"),
+    ("client_admin",            "*", "/projects/*", "*"),
+    ("client_admin",            "*", "/get-messages","*"),
     ("client_admin",            "*", "/send-message","*"),
 
-    ("client_technician",       "*", "/projects",        "read_without_financial"),
-    ("client_technician",       "*", "/projects/view/*", "read_without_financial"),
+    ("client_technician",       "*", "/projects",        "get"),
+    ("client_technician",       "*", "/projects/view/*", "get"),
     ("client_technician",       "*", "/get-messages",    "*"),
+]
+
+INITIAL_ROLE_MAPPINGS = [
+    ("client_technician", "client_admin", "*"),
 ]
 
