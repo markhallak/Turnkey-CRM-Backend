@@ -25,6 +25,7 @@ async def createMagicLink(
         lastName: str,
         accountType: str,
         ttlHours: int = 24,
+        assignTo: str | None = None,
 ) -> str:
     new_uuid = uuid4()
     expires_at = datetime.now(timezone.utc) + timedelta(hours=ttlHours)
@@ -41,6 +42,7 @@ async def createMagicLink(
             "firstName": firstName,
             "lastName": lastName,
             "accountType": accountType,
+            **({"assignTo": assignTo} if assignTo else {}),
             "next_step": "set-recovery-phrase",
             "exp": int(expires_at.timestamp()),
         }

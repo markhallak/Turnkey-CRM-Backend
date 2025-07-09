@@ -17,6 +17,61 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS citext;
 """
 
+# List of US states used to seed the state table on first run
+US_STATES = [
+    "Alabama",
+    "Alaska",
+    "Arizona",
+    "Arkansas",
+    "California",
+    "Colorado",
+    "Connecticut",
+    "Delaware",
+    "Florida",
+    "Georgia",
+    "Hawaii",
+    "Idaho",
+    "Illinois",
+    "Indiana",
+    "Iowa",
+    "Kansas",
+    "Kentucky",
+    "Louisiana",
+    "Maine",
+    "Maryland",
+    "Massachusetts",
+    "Michigan",
+    "Minnesota",
+    "Mississippi",
+    "Missouri",
+    "Montana",
+    "Nebraska",
+    "Nevada",
+    "New Hampshire",
+    "New Jersey",
+    "New Mexico",
+    "New York",
+    "North Carolina",
+    "North Dakota",
+    "Ohio",
+    "Oklahoma",
+    "Oregon",
+    "Pennsylvania",
+    "Rhode Island",
+    "South Carolina",
+    "South Dakota",
+    "Tennessee",
+    "Texas",
+    "Utah",
+    "Vermont",
+    "Virginia",
+    "Washington",
+    "West Virginia",
+    "Wisconsin",
+    "Wyoming",
+    "District of Columbia",
+]
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CASBIN RULE TABLE
 # ──────────────────────────────────────────────────────────────────────────────
@@ -46,8 +101,6 @@ CREATE TABLE IF NOT EXISTS status (
   color      VARCHAR(255),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted BOOLEAN     NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ,
   UNIQUE(category, value)
 );
 """
@@ -90,9 +143,16 @@ CREATE TABLE IF NOT EXISTS client_type (
   id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
   value      VARCHAR(255) NOT NULL UNIQUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted BOOLEAN     NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+PAY_TERM = """
+CREATE TABLE IF NOT EXISTS pay_term (
+  id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  value      VARCHAR(255) NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -103,9 +163,7 @@ CREATE TABLE IF NOT EXISTS client_rate (
   rate_amount INT         NOT NULL,
   PRIMARY KEY (client_id, rate_type),
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted  BOOLEAN     NOT NULL DEFAULT FALSE,
-  deleted_at  TIMESTAMPTZ
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -176,9 +234,7 @@ CREATE TABLE IF NOT EXISTS project_priority (
   value      VARCHAR(255) NOT NULL UNIQUE,
   color      VARCHAR(255) NOT NULL UNIQUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted BOOLEAN     NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -187,9 +243,7 @@ CREATE TABLE IF NOT EXISTS project_type (
   id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
   value      VARCHAR(255) NOT NULL UNIQUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted BOOLEAN     NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -198,9 +252,7 @@ CREATE TABLE IF NOT EXISTS project_trade (
   id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
   value      VARCHAR(255) NOT NULL UNIQUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted BOOLEAN     NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -296,8 +348,6 @@ CREATE TABLE IF NOT EXISTS message_mention (
   message_id  UUID         NOT NULL REFERENCES message(id) ON DELETE CASCADE,
   user_email  CITEXT       NOT NULL REFERENCES "user"(email)    ON DELETE CASCADE,
   created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  is_deleted  BOOLEAN      NOT NULL DEFAULT FALSE,
-  deleted_at  TIMESTAMPTZ,
   UNIQUE(message_id, user_email)
 );
 """
@@ -315,9 +365,7 @@ CREATE TABLE IF NOT EXISTS magic_link (
   consumed       BOOLEAN     NOT NULL DEFAULT FALSE,
   purpose        VARCHAR(32) NOT NULL,
   is_sent        BOOLEAN     NOT NULL DEFAULT FALSE,
-  send_to        CITEXT       NOT NULL,
-  is_deleted     BOOLEAN      NOT NULL DEFAULT FALSE,
-  deleted_at     TIMESTAMPTZ
+  send_to        CITEXT       NOT NULL
 );
 """
 
@@ -352,9 +400,7 @@ CREATE TABLE IF NOT EXISTS client_password (
   salt                  BYTEA       NOT NULL,
   kdf_params            JSONB       NOT NULL,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted            BOOLEAN     NOT NULL DEFAULT FALSE,
-  deleted_at            TIMESTAMPTZ
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -368,9 +414,7 @@ CREATE TABLE IF NOT EXISTS user_recovery_params (
   kdf_params JSONB       NOT NULL,
   digest     BYTEA       NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted BOOLEAN     NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -381,8 +425,6 @@ CREATE TABLE IF NOT EXISTS user_key (
   purpose  VARCHAR(16) NOT NULL,
   public_key BYTEA NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ,
   PRIMARY KEY (user_email, purpose)
 );
 """
@@ -392,9 +434,7 @@ CREATE TABLE IF NOT EXISTS jwt_token (
   jti UUID PRIMARY KEY,
   user_email CITEXT NOT NULL,
   expires_at TIMESTAMPTZ NOT NULL,
-  revoked BOOLEAN NOT NULL DEFAULT FALSE,
-  is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ
+  revoked BOOLEAN NOT NULL DEFAULT FALSE
 );
 """
 
@@ -423,9 +463,7 @@ CREATE TABLE IF NOT EXISTS state (
   id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
   name       VARCHAR(255) NOT NULL UNIQUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted BOOLEAN     NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -440,9 +478,7 @@ CREATE TABLE IF NOT EXISTS notification (
   triggered_by_user CITEXT,
   content TEXT NOT NULL,
   isProcessed BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -479,9 +515,7 @@ CREATE TABLE IF NOT EXISTS client_onboarding_general (
   naics_code                  VARCHAR(20),
   duns_number                 VARCHAR(20),
   created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
-  deleted_at                  TIMESTAMPTZ
+  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS client_onboarding_service (
@@ -495,9 +529,7 @@ CREATE TABLE IF NOT EXISTS client_onboarding_service (
   covers_after_hours          BOOLEAN      NOT NULL DEFAULT FALSE,
   covers_weekend_calls        BOOLEAN      NOT NULL DEFAULT FALSE,
   created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
-  deleted_at                  TIMESTAMPTZ
+  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS client_onboarding_contact (
@@ -509,9 +541,7 @@ CREATE TABLE IF NOT EXISTS client_onboarding_contact (
   regular_hours_contact       VARCHAR(255),
   emergency_hours_contact     VARCHAR(255),
   created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
-  deleted_at                  TIMESTAMPTZ
+  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS client_onboarding_load (
@@ -521,9 +551,7 @@ CREATE TABLE IF NOT EXISTS client_onboarding_load (
   po_source_split             TEXT,
   monthly_po_capacity         INT,
   created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
-  deleted_at                  TIMESTAMPTZ
+  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS client_trade_coverage (
@@ -534,8 +562,6 @@ CREATE TABLE IF NOT EXISTS client_trade_coverage (
     CHECK (coverage_level IN ('NOT','LIGHT','FULL')),
   created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
   updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
-  deleted_at                  TIMESTAMPTZ,
   UNIQUE (client_id, project_trade_id)
 );
 
@@ -547,9 +573,7 @@ CREATE TABLE IF NOT EXISTS client_pricing_structure (
   after_hours_rate            VARCHAR(50),
   is_custom                   BOOLEAN      NOT NULL DEFAULT FALSE,
   created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
-  deleted_at                  TIMESTAMPTZ
+  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS client_references (
@@ -560,9 +584,7 @@ CREATE TABLE IF NOT EXISTS client_references (
   contact_email               CITEXT,
   contact_phone               VARCHAR(50),
   created_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  is_deleted                  BOOLEAN      NOT NULL DEFAULT FALSE,
-  deleted_at                  TIMESTAMPTZ
+  updated_at                  TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 """
 
@@ -572,8 +594,6 @@ CREATE TABLE IF NOT EXISTS account_manager_client (
   account_manager_email CITEXT NOT NULL REFERENCES "user"(email) ON DELETE CASCADE,
   client_id UUID NOT NULL REFERENCES client(id) ON DELETE CASCADE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  deleted_at TIMESTAMPTZ,
   PRIMARY KEY (account_manager_email, client_id)
 );
 """
@@ -584,8 +604,6 @@ CREATE TABLE IF NOT EXISTS client_admin_technician (
   client_admin_email CITEXT NOT NULL REFERENCES "user"(email) ON DELETE CASCADE,
   technician_email   CITEXT NOT NULL REFERENCES "user"(email) ON DELETE CASCADE,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-  is_deleted         BOOLEAN NOT NULL DEFAULT FALSE,
-  deleted_at         TIMESTAMPTZ,
   PRIMARY KEY (client_admin_email, technician_email)
 );
 """
@@ -627,9 +645,9 @@ SELECT
   )                                    AS open_projects
 FROM client c
 LEFT JOIN invoice i ON i.client_id = c.id AND i.is_deleted = FALSE
-LEFT JOIN status s ON s.id = i.status_id AND s.is_deleted = FALSE
+LEFT JOIN status s ON s.id = i.status_id
 LEFT JOIN project p ON p.client_id = c.id AND p.is_deleted = FALSE
-LEFT JOIN status ps ON ps.id = p.status_id AND ps.is_deleted = FALSE
+LEFT JOIN status ps ON ps.id = p.status_id
 WHERE c.is_deleted = FALSE
 GROUP BY c.id;
 
@@ -650,9 +668,9 @@ SELECT
   ) AS open_projects
 FROM client c
 LEFT JOIN invoice i ON i.client_id = c.id AND i.is_deleted = FALSE
-LEFT JOIN status s ON s.id = i.status_id AND s.is_deleted = FALSE
+LEFT JOIN status s ON s.id = i.status_id
 LEFT JOIN project p ON p.client_id = c.id AND p.is_deleted = FALSE
-LEFT JOIN status ps ON ps.id = p.status_id AND ps.is_deleted = FALSE
+LEFT JOIN status ps ON ps.id = p.status_id
 WHERE c.is_deleted = FALSE;
 
 CREATE OR REPLACE VIEW global_search AS
@@ -712,7 +730,7 @@ CREATE INDEX IF NOT EXISTS idx_project_scheduled_month ON project (EXTRACT(MONTH
 CREATE INDEX IF NOT EXISTS idx_project_due_month ON project (EXTRACT(MONTH FROM due_date)) WHERE scheduled_date IS NULL AND is_deleted = FALSE;
 CREATE INDEX IF NOT EXISTS idx_project_event_cursor ON project ((COALESCE(scheduled_date, due_date)) DESC, id DESC) WHERE is_deleted = FALSE;
 
-CREATE INDEX IF NOT EXISTS idx_project_type_deleted_value ON project_type (is_deleted, value);
+CREATE INDEX IF NOT EXISTS idx_project_type_value ON project_type (value);
 CREATE INDEX IF NOT EXISTS idx_client_type      ON client(type_id);
 CREATE INDEX IF NOT EXISTS idx_client_state     ON client(state_id);
 CREATE INDEX IF NOT EXISTS idx_client_rate      ON client_rate(client_id);
@@ -728,13 +746,14 @@ CREATE INDEX IF NOT EXISTS idx_msg_sender       ON message(sender_id);
 CREATE INDEX IF NOT EXISTS idx_msg_project      ON message(project_id);
 CREATE INDEX IF NOT EXISTS idx_msg_attachment   ON message(file_attachment_id);
 CREATE INDEX IF NOT EXISTS idx_doc_project      ON document(project_id);
-CREATE INDEX IF NOT EXISTS idx_msg_mention_user   ON message_mention(user_email) WHERE is_deleted = FALSE;
-CREATE INDEX IF NOT EXISTS idx_magiclink_email    ON magic_link(user_email)      WHERE is_deleted = FALSE;
-CREATE INDEX IF NOT EXISTS idx_jwt_user           ON jwt_token(user_email)       WHERE is_deleted = FALSE;
+CREATE INDEX IF NOT EXISTS idx_msg_mention_user   ON message_mention(user_email);
+CREATE INDEX IF NOT EXISTS idx_magiclink_email    ON magic_link(user_email);
+CREATE INDEX IF NOT EXISTS idx_jwt_user           ON jwt_token(user_email);
 CREATE INDEX IF NOT EXISTS idx_casbin_subject_dom ON casbin_rule(v0, v1);
 CREATE INDEX IF NOT EXISTS idx_notification_cursor ON notification (created_at DESC, id DESC);
-CREATE INDEX IF NOT EXISTS idx_status_proj_category_deleted_value ON status (category, is_deleted, value);
-CREATE INDEX IF NOT EXISTS idx_project_trade_deleted_value ON project_trade (is_deleted, value);
+CREATE INDEX IF NOT EXISTS idx_status_proj_category_value ON status (category, value);
+CREATE INDEX IF NOT EXISTS idx_project_trade_value ON project_trade (value);
+CREATE INDEX IF NOT EXISTS idx_pay_term_value ON pay_term (value);
 CREATE INDEX IF NOT EXISTS idx_message_project_created_at ON message(project_id, created_at DESC) WHERE is_deleted = FALSE;
 CREATE INDEX IF NOT EXISTS idx_quote_project_created_at ON quote(project_id, created_at DESC) WHERE is_deleted = FALSE;
 CREATE INDEX IF NOT EXISTS idx_document_project_created_at ON document(project_id, created_at DESC) WHERE is_deleted = FALSE;
@@ -770,11 +789,11 @@ BEGIN
 
     COALESCE((SELECT u.first_name||' '||u.last_name FROM "user" u WHERE u.id=NEW.client_id AND NOT u.is_deleted), ''),
     COALESCE((SELECT u2.first_name||' '||u2.last_name FROM "user" u2 WHERE u2.id=NEW.assignee_id AND NOT u2.is_deleted), ''),
-    COALESCE((SELECT pp.value FROM project_priority pp WHERE pp.id=NEW.priority_id AND NOT pp.is_deleted), ''),
-    COALESCE((SELECT pt.value FROM project_type pt WHERE pt.id=NEW.type_id AND NOT pt.is_deleted), ''),
-    COALESCE((SELECT st.value FROM status st WHERE st.id=NEW.status_id AND st.category='project' AND NOT st.is_deleted), ''),
-    COALESCE((SELECT tr.value FROM project_trade tr WHERE tr.id=NEW.trade_id AND NOT tr.is_deleted), ''),
-    COALESCE((SELECT s.name FROM state s WHERE s.id=NEW.state_id AND NOT s.is_deleted), '')
+    COALESCE((SELECT pp.value FROM project_priority pp WHERE pp.id=NEW.priority_id), ''),
+    COALESCE((SELECT pt.value FROM project_type pt WHERE pt.id=NEW.type_id), ''),
+    COALESCE((SELECT st.value FROM status st WHERE st.id=NEW.status_id AND st.category='project'), ''),
+    COALESCE((SELECT tr.value FROM project_trade tr WHERE tr.id=NEW.trade_id), ''),
+    COALESCE((SELECT s.name FROM state s WHERE s.id=NEW.state_id), '')
   ], ' ');
   RETURN NEW;
 END;
@@ -953,6 +972,7 @@ async def create_tables():
             ("status", STATUS),
             ("state", STATE),
             ("client_type", CLIENT_TYPE),
+            ("pay_term", PAY_TERM),
             ("client", CLIENT),
             ("client_rate", CLIENT_RATE),
             ("user", USER),
@@ -1010,8 +1030,14 @@ async def create_tables():
                     ("p", "client_technician", "*", "/projects/view/*", "get"),
                     ("p", "client_technician", "*", "/get-messages", "*"),
 
-                    ("g", "client_technician", "client_admin", "*", ""),
+                    ("g", "client_technician", "client_admin", "*"),
                 ]
+            )
+
+        if await conn.fetchval("SELECT count(*) FROM state") == 0:
+            await conn.executemany(
+                "INSERT INTO state (name) VALUES ($1) ON CONFLICT DO NOTHING;",
+                [(s,) for s in US_STATES],
             )
 
         # Moved outside the loop
