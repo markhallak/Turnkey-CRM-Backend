@@ -1030,7 +1030,7 @@ async def create_tables():
                     ("p", "client_technician", "*", "/projects/view/*", "get"),
                     ("p", "client_technician", "*", "/get-messages", "*"),
 
-                    ("g", "client_technician", "client_admin", "*"),
+                    ("g", "client_technician", "client_admin", "*", "*"),
                 ]
             )
 
