@@ -12,26 +12,8 @@ SECRET_KEY = "dev-secret"
 KMS_URL = os.getenv("KMS_URL", "http://localhost:9000")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
-INITIAL_POLICIES = [
-    ("employee_admin",          "*", "*", "*"),
-    ("employee_account_manager","*", "/clients",   "*"),
-    ("employee_account_manager","*", "/clients/*", "*"),
-    ("employee_account_manager","*", "/projects",  "*"),
-    ("employee_account_manager","*", "/projects/*","*"),
-    ("employee_account_manager","*", "/get-messages","*"),
-    ("employee_account_manager","*", "/send-message","*"),
+# If true, skip validation checks for onboarding data
+BYPASS_ONBOARDING_CHECKS = False
+BYPASS_SESSION = False
 
-    ("client_admin",            "*", "/projects",    "*"),
-    ("client_admin",            "*", "/projects/*", "*"),
-    ("client_admin",            "*", "/get-messages","*"),
-    ("client_admin",            "*", "/send-message","*"),
-
-    ("client_technician",       "*", "/projects",        "get"),
-    ("client_technician",       "*", "/projects/view/*", "get"),
-    ("client_technician",       "*", "/get-messages",    "*"),
-]
-
-INITIAL_ROLE_MAPPINGS = [
-    ("client_technician", "client_admin", "*"),
-]
 

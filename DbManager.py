@@ -793,7 +793,7 @@ BEGIN
     COALESCE((SELECT pt.value FROM project_type pt WHERE pt.id=NEW.type_id), ''),
     COALESCE((SELECT st.value FROM status st WHERE st.id=NEW.status_id AND st.category='project'), ''),
     COALESCE((SELECT tr.value FROM project_trade tr WHERE tr.id=NEW.trade_id), ''),
-    COALESCE((SELECT s.name FROM state s WHERE s.id=NEW.state_id), '')
+    COALESCE((SELECT s.name FROM state WHERE s.id=NEW.state_id), '')
   ], ' ');
   RETURN NEW;
 END;
@@ -1014,21 +1014,96 @@ async def create_tables():
                 """,
                 [
                     ("p", "employee_admin", "*", "*", "*"),
-                    ("p", "employee_account_manager", "*", "/clients", "*"),
-                    ("p", "employee_account_manager", "*", "/clients/*", "*"),
-                    ("p", "employee_account_manager", "*", "/projects", "*"),
-                    ("p", "employee_account_manager", "*", "/projects/*", "*"),
+
                     ("p", "employee_account_manager", "*", "/get-messages", "*"),
                     ("p", "employee_account_manager", "*", "/send-message", "*"),
+                    ("p", "employee_account_manager", "*", "/global-search", "*"),
+                    ("p", "employee_account_manager", "*", "/get-notifications", "*"),
+                    ("p", "employee_account_manager", "*", "/get-profile-details", "*"),
+                    ("p", "employee_account_manager", "*", "/get-dashboard-metrics", "*"),
+                    ("p", "employee_account_manager", "*", "/get-calendar-events", "*"),
+                    ("p", "employee_account_manager", "*", "/get-projects", "*"),
+                    ("p", "employee_account_manager", "*", "/get-project-statuses", "*"),
+                    ("p", "employee_account_manager", "*", "/get-project-types", "*"),
+                    ("p", "employee_account_manager", "*", "/get-project-trades", "*"),
+                    ("p", "employee_account_manager", "*", "/get-project-priorities", "*"),
+                    ("p", "employee_account_manager", "*", "/get-project-assessments", "*"),
+                    ("p", "employee_account_manager", "*", "/get-states", "*"),
+                    ("p", "employee_account_manager", "*", "/create-new-project", "*"),
+                    ("p", "employee_account_manager", "*", "/fetch-project", "*"),
+                    ("p", "employee_account_manager", "*", "/fetch-project-quotes", "*"),
+                    ("p", "employee_account_manager", "*", "/fetch-project-documents", "*"),
+                    ("p", "employee_account_manager", "*", "/get-clients", "*"),
+                    ("p", "employee_account_manager", "*", "/get-pay-terms", "*"),
+                    ("p", "employee_account_manager", "*", "/create-new-client", "*"),
+                    ("p", "employee_account_manager", "*", "/fetch-client", "*"),
+                    ("p", "employee_account_manager", "*", "/fetch-client-invoices", "*"),
+                    ("p", "employee_account_manager", "*", "/fetch-client-onboarding-documents", "*"),
+                    ("p", "employee_account_manager", "*", "/get-client-statuses", "*"),
+                    ("p", "employee_account_manager", "*", "/get-insurance-documents", "*"),
+                    ("p", "employee_account_manager", "*", "/fetch-client-projects", "*"),
+                    ("p", "employee_account_manager", "*", "/get-billings", "*"),
+                    ("p", "employee_account_manager", "*", "/get-billing-statuses", "*"),
+                    ("p", "employee_account_manager", "*", "/get-invoice-statuses", "*"),
+                    ("p", "employee_account_manager", "*", "/get-quote-statuses", "*"),
+                    ("p", "employee_account_manager", "*", "/get-passwords", "*"),
+                    ("p", "employee_account_manager", "*", "/create-new-invoice", "*"),
+                    ("p", "employee_account_manager", "*", "/create-new-quote", "*"),
+                    ("p", "employee_account_manager", "*", "/get-invoice", "*"),
+                    ("p", "employee_account_manager", "*", "/get-quote", "*"),
+                    ("p", "employee_account_manager", "*", "/get-onboarding-data", "*"),
+                    ("p", "employee_account_manager", "*", "/update-insurance-data", "*"),
 
-                    ("p", "client_admin", "*", "/projects", "*"),
-                    ("p", "client_admin", "*", "/projects/*", "*"),
                     ("p", "client_admin", "*", "/get-messages", "*"),
                     ("p", "client_admin", "*", "/send-message", "*"),
+                    ("p", "client_admin", "*", "/get-notifications", "*"),
+                    ("p", "client_admin", "*", "/save-onboarding-data", "*"),
+                    ("p", "client_admin", "*", "/get-onboarding-data", "*"),
+                    ("p", "client_admin", "*", "/update-insurance-data", "*"),
+                    ("p", "client_admin", "*", "/save-onboarding-data", "*"),
+                    ("p", "client_admin", "*", "/get-profile-details", "*"),
+                    ("p", "client_admin", "*", "/get-states", "*"),
+                    ("p", "client_admin", "*", "/fetch-project", "*"),
+                    ("p", "client_admin", "*", "/fetch-project-quotes", "*"),
+                    ("p", "client_admin", "*", "/fetch-project-documents", "*"),
+                    ("p", "client_admin", "*", "/fetch-client", "*"),
+                    ("p", "client_admin", "*", "/fetch-client-invoices", "*"),
+                    ("p", "client_admin", "*", "/fetch-client-onboarding-documents", "*"),
+                    ("p", "client_admin", "*", "/get-client-statuses", "*"),
+                    ("p", "client_admin", "*", "/get-insurance-documents", "*"),
+                    ("p", "client_admin", "*", "/fetch-client-projects", "*"),
+                    ("p", "client_admin", "*", "/get-billings", "*"),
+                    ("p", "client_admin", "*", "/get-billing-statuses", "*"),
+                    ("p", "client_admin", "*", "/get-invoice-statuses", "*"),
+                    ("p", "client_admin", "*", "/get-quote-statuses", "*"),
+                    ("p", "client_admin", "*", "/get-passwords", "*"),
+                    ("p", "client_admin", "*", "/get-invoice", "*"),
+                    ("p", "client_admin", "*", "/get-quote", "*"),
+                    ("p", "client_admin", "*", "/get-onboarding-data", "*"),
+                    ("p", "client_admin", "*", "/update-insurance-data", "*"),
 
-                    ("p", "client_technician", "*", "/projects", "get"),
-                    ("p", "client_technician", "*", "/projects/view/*", "get"),
                     ("p", "client_technician", "*", "/get-messages", "*"),
+                    ("p", "client_technician", "*", "/get-notifications", "*"),
+                    ("p", "client_technician", "*", "/get-profile-details", "*"),
+                    ("p", "client_technician", "*", "/get-states", "*"),
+                    ("p", "client_technician", "*", "/fetch-project", "*"),
+                    ("p", "client_technician", "*", "/fetch-project-quotes", "*"),
+                    ("p", "client_technician", "*", "/fetch-project-documents", "*"),
+                    ("p", "client_technician", "*", "/fetch-client", "*"),
+                    ("p", "client_technician", "*", "/fetch-client-invoices", "*"),
+                    ("p", "client_technician", "*", "/fetch-client-onboarding-documents", "*"),
+                    ("p", "client_technician", "*", "/get-client-statuses", "*"),
+                    ("p", "client_technician", "*", "/get-insurance-documents", "*"),
+                    ("p", "client_technician", "*", "/fetch-client-projects", "*"),
+                    ("p", "client_technician", "*", "/get-billings", "*"),
+                    ("p", "client_technician", "*", "/get-billing-statuses", "*"),
+                    ("p", "client_technician", "*", "/get-invoice-statuses", "*"),
+                    ("p", "client_technician", "*", "/get-quote-statuses", "*"),
+                    ("p", "client_technician", "*", "/get-passwords", "*"),
+                    ("p", "client_technician", "*", "/get-invoice", "*"),
+                    ("p", "client_technician", "*", "/get-quote", "*"),
+                    ("p", "client_technician", "*", "/get-onboarding-data", "*"),
+                    ("p", "client_technician", "*", "/update-insurance-data", "*"),
 
                     ("g", "client_technician", "client_admin", "*", "*"),
                 ]
@@ -1038,6 +1113,76 @@ async def create_tables():
             await conn.executemany(
                 "INSERT INTO state (name) VALUES ($1) ON CONFLICT DO NOTHING;",
                 [(s,) for s in US_STATES],
+            )
+
+        if await conn.fetchval("SELECT count(*) FROM project_priority") == 0:
+            await conn.executemany(
+                "INSERT INTO project_priority (value, color) VALUES ($1, $2);",
+                [
+                    ("P1 - Emergency", "red-500"),
+                    ("P2 - Same Day", "orange-500"),
+                    ("P3 - Standard", "yellow-500"),
+                ],
+            )
+
+        if await conn.fetchval("SELECT count(*) FROM project_type") == 0:
+            await conn.executemany(
+                "INSERT INTO project_type (value) VALUES ($1);",
+                [("Repair",), ("Installation",)],
+            )
+
+        if await conn.fetchval("SELECT count(*) FROM project_trade") == 0:
+            await conn.executemany(
+                "INSERT INTO project_trade (value) VALUES ($1);",
+                [("Electrical",), ("Plumbing",)],
+            )
+
+        if await conn.fetchval("SELECT count(*) FROM client_type") == 0:
+            await conn.executemany(
+                "INSERT INTO client_type (value) VALUES ($1);",
+                [("Retail",), ("Corporate",)],
+            )
+
+        if await conn.fetchval("SELECT count(*) FROM pay_term") == 0:
+            await conn.executemany(
+                "INSERT INTO pay_term (value) VALUES ($1);",
+                [("Net 30",), ("Net 60",)],
+            )
+
+        if await conn.fetchval("SELECT count(*) FROM status WHERE category='project'") == 0:
+            await conn.executemany(
+                "INSERT INTO status (category, value, color) VALUES ($1,$2,$3);",
+                [
+                    ("project", "Open", "green-500"),
+                    ("project", "Delayed", "yellow-500"),
+                ],
+            )
+
+        if await conn.fetchval("SELECT count(*) FROM status WHERE category='quote'") == 0:
+            await conn.executemany(
+                "INSERT INTO status (category, value, color) VALUES ($1,$2,$3);",
+                [
+                    ("quote", "Pending", "yellow-500"),
+                    ("quote", "Approved", "green-500"),
+                ],
+            )
+
+        if await conn.fetchval("SELECT count(*) FROM status WHERE category='invoice'") == 0:
+            await conn.executemany(
+                "INSERT INTO status (category, value, color) VALUES ($1,$2,$3);",
+                [
+                    ("invoice", "Sent", "blue-500"),
+                    ("invoice", "Paid", "green-500"),
+                ],
+            )
+
+        if await conn.fetchval("SELECT count(*) FROM status WHERE category='client'") == 0:
+            await conn.executemany(
+                "INSERT INTO status (category, value, color) VALUES ($1,$2,$3);",
+                [
+                    ("client", "Active", "green-500"),
+                    ("client", "Inactive", "red-500"),
+                ],
             )
 
         # Moved outside the loop
