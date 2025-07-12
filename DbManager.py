@@ -333,6 +333,7 @@ CREATE TABLE IF NOT EXISTS message (
   updated_at         TIMESTAMPTZ  NOT NULL DEFAULT now(),
   content            TEXT         NOT NULL,
   sender_id          UUID         NOT NULL REFERENCES "user"(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+  sender_role        CITEXT       NOT NULL,
   project_id         UUID         NOT NULL REFERENCES project(id) ON UPDATE CASCADE ON DELETE RESTRICT,
   file_attachment_id UUID         REFERENCES document(id)      ON UPDATE CASCADE ON DELETE RESTRICT,
   is_deleted         BOOLEAN      NOT NULL DEFAULT FALSE,
@@ -609,18 +610,6 @@ CREATE TABLE IF NOT EXISTS client_admin_technician (
 """
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 14: ALTERS (search_text columns)
-# ──────────────────────────────────────────────────────────────────────────────
-
-ALTERS = """
-ALTER TABLE project  ADD COLUMN IF NOT EXISTS search_text TEXT;
-ALTER TABLE client   ADD COLUMN IF NOT EXISTS search_text TEXT;
-ALTER TABLE document ADD COLUMN IF NOT EXISTS search_text TEXT;
-ALTER TABLE quote    ADD COLUMN IF NOT EXISTS search_text TEXT;
-ALTER TABLE invoice  ADD COLUMN IF NOT EXISTS search_text TEXT;
-ALTER TABLE message  ADD COLUMN IF NOT EXISTS search_text TEXT;
-"""
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 15: VIEWS
@@ -743,6 +732,7 @@ CREATE INDEX IF NOT EXISTS idx_inv_status       ON invoice(status_id);
 CREATE INDEX IF NOT EXISTS idx_inv_file         ON invoice(file_id);
 CREATE INDEX IF NOT EXISTS idx_inv_issuance     ON invoice(issuance_date);
 CREATE INDEX IF NOT EXISTS idx_msg_sender       ON message(sender_id);
+CREATE INDEX IF NOT EXISTS idx_msg_sender_role  ON message(sender_role);
 CREATE INDEX IF NOT EXISTS idx_msg_project      ON message(project_id);
 CREATE INDEX IF NOT EXISTS idx_msg_attachment   ON message(file_attachment_id);
 CREATE INDEX IF NOT EXISTS idx_doc_project      ON document(project_id);
@@ -996,7 +986,6 @@ async def create_tables():
             ("insurance", INSURANCE),
             ("notification", NOTIFICATION),
             ("notification_listen_notify", NOTIFICATION_LISTEN_NOTIFY),
-            ("alter", ALTERS),
             ("views", VIEWS),
             ("prepares", PREPARES),
             ("indices", INDICES),
@@ -1030,7 +1019,7 @@ async def create_tables():
                     ("p", "employee_account_manager", "*", "/get-project-assessments", "*"),
                     ("p", "employee_account_manager", "*", "/get-states", "*"),
                     ("p", "employee_account_manager", "*", "/create-new-project", "*"),
-                    ("p", "employee_account_manager", "*", "/fetch-project", "*"),
+                    ("p", "employee_account_manager", "*", "/get-project", "*"),
                     ("p", "employee_account_manager", "*", "/fetch-project-quotes", "*"),
                     ("p", "employee_account_manager", "*", "/fetch-project-documents", "*"),
                     ("p", "employee_account_manager", "*", "/get-clients", "*"),
@@ -1063,7 +1052,7 @@ async def create_tables():
                     ("p", "client_admin", "*", "/save-onboarding-data", "*"),
                     ("p", "client_admin", "*", "/get-profile-details", "*"),
                     ("p", "client_admin", "*", "/get-states", "*"),
-                    ("p", "client_admin", "*", "/fetch-project", "*"),
+                    ("p", "client_admin", "*", "/get-project", "*"),
                     ("p", "client_admin", "*", "/fetch-project-quotes", "*"),
                     ("p", "client_admin", "*", "/fetch-project-documents", "*"),
                     ("p", "client_admin", "*", "/fetch-client", "*"),
@@ -1086,7 +1075,7 @@ async def create_tables():
                     ("p", "client_technician", "*", "/get-notifications", "*"),
                     ("p", "client_technician", "*", "/get-profile-details", "*"),
                     ("p", "client_technician", "*", "/get-states", "*"),
-                    ("p", "client_technician", "*", "/fetch-project", "*"),
+                    ("p", "client_technician", "*", "/get-project", "*"),
                     ("p", "client_technician", "*", "/fetch-project-quotes", "*"),
                     ("p", "client_technician", "*", "/fetch-project-documents", "*"),
                     ("p", "client_technician", "*", "/fetch-client", "*"),

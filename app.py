@@ -224,6 +224,7 @@ async def syncCasbinRelations(conn: Connection, enforcer: AsyncEnforcer, watcher
     )
     for r in amRows:
         await save_role_mapping(
+            conn,
             r["account_manager_email"],
             "account_manager_client",
             str(r["client_id"]),
@@ -234,6 +235,7 @@ async def syncCasbinRelations(conn: Connection, enforcer: AsyncEnforcer, watcher
     )
     for r in caRows:
         await save_role_mapping(
+            conn,
             r["client_admin_email"],
             "client_admin_technician",
             r["technician_email"],
@@ -391,8 +393,7 @@ app.add_middleware(
 )
 
 
-async def save_role_mapping(sub: str, role: str, dom: str = "*", delete: bool = False,
-                            conn: Connection = Depends(get_conn),):
+async def save_role_mapping(conn: Connection, sub: str, role: str, dom: str = "*", delete: bool = False):
     if delete:
         await conn.execute(
             "DELETE FROM casbin_rule WHERE ptype='g' AND v0=$1 AND v1=$2 AND v2=$3",
@@ -424,20 +425,23 @@ async def getEd25519PublicKey(request: Request):
 
 
 @app.get("/auth/me")
-async def whoami(user: SimpleUser = Depends(getCurrentUser)):
+async def whoami(user: SimpleUser = Depends(getCurrentUser), enforcer: AsyncEnforcer = Depends(getEnforcer)):
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="unauthenticated",
         )
 
+    roles = await enforcer.get_roles_for_user_in_domain(user.email, "*")
+    print("ROLES: ", roles)
     return {
         "email": user.email,
         "firstName": user.firstName,
         "lastName": user.lastName,
         "setup_done": user.setup_done,
         "onboarding_done": user.onboarding_done,
-        "is_client": user.is_client
+        "is_client": user.is_client,
+        "role": roles[0]
     }
 
 
@@ -576,8 +580,68 @@ async def globalSearch(
     return payload
 
 
+@app.post("/get-mention-users")
+async def getMentionUsers(
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser),
+        enforcer: AsyncEnforcer = Depends(getEnforcer)):
+    if not user:
+        raise HTTPException(status_code=401, detail="unauthenticated")
+    roles = await enforcer.get_roles_for_user_in_domain(user.email, "*")
+    rows = []
+    if "client_admin" in roles or "client_technician" in roles:
+        client_id = await conn.fetchval(
+            'SELECT client_id FROM "user" WHERE email=$1', user.email)
+        rows = await conn.fetch(
+            """
+            SELECT u.email, u.first_name, u.last_name, r.v1 AS role
+            FROM "user" u
+            JOIN casbin_rule r ON r.ptype='g' AND r.v0=u.email
+            WHERE r.v1 IN ('employee_admin','employee_account_manager')
+              AND (
+                r.v1='employee_admin' OR EXISTS (
+                  SELECT 1 FROM account_manager_client amc
+                  WHERE amc.client_id=$1 AND amc.account_manager_email=u.email
+                )
+              )
+            ORDER BY u.first_name
+            """,
+            client_id,
+        )
+    elif "employee_admin" in roles or "employee_account_manager" in roles:
+        rows = await conn.fetch(
+            """
+            SELECT u.email, u.first_name, u.last_name, r.v1 AS role
+            FROM "user" u
+            JOIN casbin_rule r ON r.ptype='g' AND r.v0=u.email
+            WHERE r.v1 IN ('employee_admin','employee_account_manager')
+              AND u.is_active=TRUE
+            ORDER BY u.first_name
+            """
+        )
+    payload = {
+        "users": [
+            {
+                "email": r["email"],
+                "firstName": r["first_name"],
+                "lastName": r["last_name"],
+                "role": r["role"],
+            }
+            for r in rows
+        ]
+    }
+    payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
+
+
 @app.post("/get-account-manager-client-relations")
-async def getAccountManagerClientRelations(conn: Connection = Depends(get_conn)):
+async def getAccountManagerClientRelations(
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
     sql = """
             SELECT amc.account_manager_email AS account_manager,
                    amc.client_id AS client,
@@ -590,7 +654,10 @@ async def getAccountManagerClientRelations(conn: Connection = Depends(get_conn))
         rows = await conn.fetch(sql)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"relations": [dict(r) for r in rows]}
+    payload = {"relations": [dict(r) for r in rows]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/create-account-manager-client-relation")
@@ -608,7 +675,7 @@ async def createAccountManagerClientRelation(
 
     try:
         await conn.execute(sql, email, UUID(clientId))
-        await save_role_mapping(email, "account_manager_client", str(UUID(clientId)))
+        await save_role_mapping(conn, email, "account_manager_client", str(UUID(clientId)))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -630,7 +697,7 @@ async def deleteAccountManagerClientRelation(
 
     try:
         await conn.execute(sql, email, UUID(clientId))
-        await save_role_mapping(email, "account_manager_client", str(UUID(clientId)), delete=True)
+        await save_role_mapping(conn, email, "account_manager_client", str(UUID(clientId)), delete=True)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -757,8 +824,8 @@ async def updateAccountManagerClientRelation(
 
     try:
         await conn.execute(sql, new_email, UUID(new_client), old_email, UUID(old_client))
-        await save_role_mapping(old_email, "account_manager_client", str(UUID(old_client)), delete=True)
-        await save_role_mapping(new_email, "account_manager_client", str(UUID(new_client)))
+        await save_role_mapping(conn, old_email, "account_manager_client", str(UUID(old_client)), delete=True)
+        await save_role_mapping(conn, new_email, "account_manager_client", str(UUID(new_client)))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -766,7 +833,11 @@ async def updateAccountManagerClientRelation(
 
 
 @app.post("/get-client-admin-technician-relations")
-async def getClientAdminTechnicianRelations(conn: Connection = Depends(get_conn)):
+async def getClientAdminTechnicianRelations(
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
     sql = """
             SELECT client_admin_email AS client_admin,
                    technician_email AS technician
@@ -777,7 +848,10 @@ async def getClientAdminTechnicianRelations(conn: Connection = Depends(get_conn)
         rows = await conn.fetch(sql)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"relations": [dict(r) for r in rows]}
+    payload = {"relations": [dict(r) for r in rows]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/create-client-admin-technician-relation")
@@ -798,7 +872,7 @@ async def createClientAdminTechnicianRelation(
 
     try:
         await conn.execute(sql, admin_email, tech_email)
-        await save_role_mapping(admin_email, "client_admin_technician", tech_email)
+        await save_role_mapping(conn, admin_email, "client_admin_technician", tech_email)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -825,8 +899,8 @@ async def updateClientAdminTechnicianRelation(
 
     try:
         await conn.execute(sql, admin_email, tech_email, old_admin, old_tech)
-        await save_role_mapping(old_admin, "client_admin_technician", old_tech, delete=True)
-        await save_role_mapping(admin_email, "client_admin_technician", tech_email)
+        await save_role_mapping(conn, old_admin, "client_admin_technician", old_tech, delete=True)
+        await save_role_mapping(conn, admin_email, "client_admin_technician", tech_email)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -851,7 +925,7 @@ async def deleteClientAdminTechnicianRelation(
 
     try:
         await conn.execute(sql, admin_email, tech_email)
-        await save_role_mapping(admin_email, "client_admin_technician", tech_email, delete=True)
+        await save_role_mapping(conn, admin_email, "client_admin_technician", tech_email, delete=True)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -867,16 +941,24 @@ async def sendMessage(
 ):
     project_id = data.get("projectId")
     content = data.get("content")
+    mention_emails = data.get("mentions", [])
     if not project_id or not content:
         raise HTTPException(status_code=400, detail="invalid params")
+    roles = await request.app.state.enforcer.get_roles_for_user_in_domain(user.email, "*")
+    role = roles[0] if roles else ""
     try:
         msg_id = await conn.fetchval(
-            "INSERT INTO message (project_id, sender_id, content) VALUES ($1,$2,$3) RETURNING id",
-            UUID(project_id), user.id, content
+            "INSERT INTO message (project_id, sender_id, content, sender_role, has_mentions) VALUES ($1,$2,$3,$4,$5) RETURNING id",
+            UUID(project_id), user.id, content, role, bool(mention_emails)
         )
         created_at = await conn.fetchval(
             "SELECT created_at FROM message WHERE id=$1", msg_id
         )
+        for e in mention_emails:
+            await conn.execute(
+                "INSERT INTO message_mention (message_id, user_email) VALUES ($1,$2) ON CONFLICT DO NOTHING",
+                msg_id, e
+            )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     payload = {"messageId": str(msg_id), "created_at": created_at.isoformat()}
@@ -948,6 +1030,7 @@ async def getNotifications(
 @app.post("/get-profile-details")
 async def getProfileDetails(
         request: Request,
+        data: dict = Depends(decryptPayload()),
         user: SimpleUser = Depends(getCurrentUser),
         conn: Connection = Depends(get_conn)
 ):
@@ -1017,6 +1100,7 @@ async def getProjectAssessments(
 @app.post("/get-dashboard-metrics")
 async def getDashboardMetrics(
         request: Request,
+        data: dict = Depends(decryptPayload()),
         conn: Connection = Depends(get_conn),
         user: SimpleUser = Depends(getCurrentUser)):
     sql = "SELECT * FROM overall_aggregates;"
@@ -1156,6 +1240,7 @@ async def getProjects(
 @app.post("/get-project-statuses")
 async def getProjectStatuses(
         request: Request,
+        data: dict = Depends(decryptPayload()),
         conn: Connection = Depends(get_conn),
         user: SimpleUser = Depends(getCurrentUser)):
     sql = """
@@ -1186,6 +1271,7 @@ async def getProjectStatuses(
 @app.post("/get-project-types")
 async def getProjectTypes(
         request: Request,
+        data: dict = Depends(decryptPayload()),
         conn: Connection = Depends(get_conn),
         user: SimpleUser = Depends(getCurrentUser)):
     sql = """
@@ -1215,6 +1301,7 @@ async def getProjectTypes(
 @app.post("/get-project-trades")
 async def getProjectTrades(
         request: Request,
+        data: dict = Depends(decryptPayload()),
         conn: Connection = Depends(get_conn),
         user: SimpleUser = Depends(getCurrentUser)):
     sql = """
@@ -1244,6 +1331,7 @@ async def getProjectTrades(
 @app.post("/get-project-priorities")
 async def getProjectPriorities(
         request: Request,
+        data: dict = Depends(decryptPayload()),
         conn: Connection = Depends(get_conn),
         user: SimpleUser = Depends(getCurrentUser)):
     sql = """
@@ -1274,6 +1362,7 @@ async def getProjectPriorities(
 @app.post("/get-all-client-admins")
 async def getAllClientAdmins(
         request: Request,
+        data: dict = Depends(decryptPayload()),
         conn: Connection = Depends(get_conn),
         user: SimpleUser = Depends(getCurrentUser)):
     sql = """
@@ -1307,6 +1396,7 @@ async def getAllClientAdmins(
 @app.post("/get-account-managers")
 async def getAccountManagers(
         request: Request,
+        data: dict = Depends(decryptPayload()),
         conn: Connection = Depends(get_conn),
         user: SimpleUser = Depends(getCurrentUser)):
     sql = """
@@ -1340,6 +1430,7 @@ async def getAccountManagers(
 @app.post("/get-states")
 async def getStates(
         request: Request,
+        data: dict = Depends(decryptPayload()),
         conn: Connection = Depends(get_conn),
         user: SimpleUser = Depends(getCurrentUser)):
     sql = """
@@ -1369,7 +1460,11 @@ async def getStates(
 
 # List all users for admin page
 @app.post("/get-users")
-async def getUsers(conn: Connection = Depends(get_conn)):
+async def getUsers(
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
     sql = """
             SELECT id, email, first_name, last_name
               FROM "user"
@@ -1380,7 +1475,7 @@ async def getUsers(conn: Connection = Depends(get_conn)):
         rows = await conn.fetch(sql)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"users": [
+    payload = {"users": [
         {
             "id": str(r["id"]),
             "email": r["email"],
@@ -1389,6 +1484,9 @@ async def getUsers(conn: Connection = Depends(get_conn)):
         }
         for r in rows
     ]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/create-new-project")
@@ -1478,14 +1576,17 @@ async def createNewProject(
 ################################################################################
 # TODO:                        PROJECT VIEW ENDPOINTS                          #
 ################################################################################
-@app.post("/fetch-project")
-async def fetchProject(
+@app.post("/get-project")
+async def getProject(
         request: Request,
-        project_id: str = Query(..., description="Project UUID"),
+        data: dict = Depends(decryptPayload()),
         conn: Connection = Depends(get_conn),
         user: SimpleUser = Depends(getCurrentUser),
         enforcer: AsyncEnforcer = Depends(getEnforcer)
 ):
+    project_id = data.get("projectId")
+    if not project_id:
+        raise HTTPException(status_code=400, detail="projectId required")
     sql = """
         SELECT
           p.id,
@@ -1578,12 +1679,12 @@ async def fetchProject(
           WHERE p.id = $1
         """
     try:
-        row = await conn.fetchrow(sql, project_id)
+        row = await conn.fetchrow(sql, UUID(project_id))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
     project = dict(row)
-    roles = await enforcer.get_roles_for_user_in_domain(user.email, "*") if user else []
+    roles = await enforcer.get_roles_for_user_in_domain(user.email, "*")
     if "client_technician" in roles:
         project.pop("nte", None)
 
@@ -1628,23 +1729,20 @@ async def getMessages(
               m.updated_at,
               m.content,
               m.sender_id,
+              m.sender_role,
+              u.email       AS sender_email,
               u.first_name  AS sender_first_name,
               u.last_name   AS sender_last_name,
-              ut.name       AS sender_type,
+              array_remove(array_agg(mm.user_email), NULL) AS mentions,
               m.file_attachment_id,
               COUNT(*) OVER() AS total_count
             FROM message m
-            JOIN project p
-              ON p.id = m.project_id
-             
-            JOIN "user" u
-              ON u.id = m.sender_id
-             
-            JOIN user_type ut
-              ON ut.id = u.type_id
-             
+            JOIN project p ON p.id = m.project_id
+            JOIN "user" u ON u.id = m.sender_id
+            LEFT JOIN message_mention mm ON mm.message_id = m.id
             WHERE  m.project_id = $1
               AND (m.created_at, m.id) < ($2::timestamptz, $3::uuid)
+            GROUP BY m.id, u.email, u.first_name, u.last_name
             ORDER BY m.created_at DESC, m.id DESC
             LIMIT $4;
         """
@@ -1844,6 +1942,8 @@ async def fetchProjectDocumentsEndpoint(
 
 @app.post("/get-clients")
 async def getClients(
+        request: Request,
+        data: dict = Depends(decryptPayload()),
         size: int = Query(..., gt=0, description="Number of clients per page"),
         last_seen_created_at: Optional[str] = Query(
             None,
@@ -1853,8 +1953,12 @@ async def getClients(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
-        conn: Connection = Depends(get_conn)
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
+    size = data.get("size", size)
+    last_seen_created_at = data.get("last_seen_created_at", last_seen_created_at)
+    last_seen_id = data.get("last_seen_id", last_seen_id)
     if last_seen_created_at:
         try:
             dt = datetime.fromisoformat(last_seen_created_at)
@@ -1910,17 +2014,24 @@ async def getClients(
         next_ts = None
         next_id = None
 
-    return {
+    payload = {
         "clients": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
     }
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/get-client-types")
-async def getClientTypes(conn: Connection = Depends(get_conn)):
+async def getClientTypes(
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
     sql = """
             SELECT id, value
             FROM client_type
@@ -1931,11 +2042,18 @@ async def getClientTypes(conn: Connection = Depends(get_conn)):
         rows = await conn.fetch(sql)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"client_types": [dict(r) for r in rows]}
+    payload = {"client_types": [dict(r) for r in rows]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/get-pay-terms")
-async def getPayTerms(conn: Connection = Depends(get_conn)):
+async def getPayTerms(
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
     sql = """
             SELECT id, value
               FROM pay_term
@@ -1946,11 +2064,18 @@ async def getPayTerms(conn: Connection = Depends(get_conn)):
         rows = await conn.fetch(sql)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"pay_terms": [dict(r) for r in rows]}
+    payload = {"pay_terms": [dict(r) for r in rows]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/get-client-statuses")
-async def getClientStatuses(conn: Connection = Depends(get_conn)):
+async def getClientStatuses(
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
     sql = """
             SELECT id, value, color
             FROM status
@@ -1963,13 +2088,18 @@ async def getClientStatuses(conn: Connection = Depends(get_conn)):
         rows = await conn.fetch(sql)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"client_statuses": [dict(r) for r in rows]}
+    payload = {"client_statuses": [dict(r) for r in rows]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/create-new-client")
 async def createNewClient(
-        payload: dict = Body(...),
-        conn: Connection = Depends(get_conn)
+        request: Request,
+        payload: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
     companyName = payload.get("companyName")
     pocFirstName = payload.get("POCFirstName")
@@ -2048,7 +2178,10 @@ async def createNewClient(
                 amount,
             )
 
-    return {"clientId": clientId}
+    payload = {"clientId": clientId}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 ################################################################################
@@ -2057,8 +2190,11 @@ async def createNewClient(
 
 @app.post("/fetch-client")
 async def fetchClient(
+        request: Request,
         client_id: str = Query(..., description="Client UUID"),
-        conn: Connection = Depends(get_conn)
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
     sql = """
         SELECT
@@ -2086,11 +2222,15 @@ async def fetchClient(
     if not row:
         raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
 
-    return {"client": dict(row)}
+    payload = {"client": dict(row)}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/fetch-client-invoices")
 async def fetchClientInvoices(
+        request: Request,
         client_id: str = Query(..., description="Client UUID"),
         size: int = Query(..., gt=0, description="Number of invoices to return"),
         q: Optional[str] = Query(None, description="Search query"),
@@ -2102,8 +2242,14 @@ async def fetchClientInvoices(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
-        conn: Connection = Depends(get_conn)
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
+    size = data.get("size", size)
+    q = data.get("q", q)
+    last_seen_created_at = data.get("last_seen_created_at", last_seen_created_at)
+    last_seen_id = data.get("last_seen_id", last_seen_id)
     if last_seen_created_at:
         try:
             dt = datetime.fromisoformat(last_seen_created_at)
@@ -2153,13 +2299,16 @@ async def fetchClientInvoices(
         next_ts = None
         next_id = None
 
-    return {
+    payload = {
         "invoices": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
     }
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/fetch-client-onboarding-documents")
@@ -2345,6 +2494,7 @@ async def getInsuranceDocuments(
 
 @app.post("/fetch-client-projects")
 async def fetchClientProjects(
+        request: Request,
         client_id: str = Query(..., description="Client UUID"),
         size: int = Query(..., gt=0, description="Number of projects to return"),
         q: Optional[str] = Query(None, description="Search query"),
@@ -2356,8 +2506,14 @@ async def fetchClientProjects(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
-        conn: Connection = Depends(get_conn)
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
+    size = data.get("size", size)
+    q = data.get("q", q)
+    last_seen_created_at = data.get("last_seen_created_at", last_seen_created_at)
+    last_seen_id = data.get("last_seen_id", last_seen_id)
     if last_seen_created_at:
         try:
             dt = datetime.fromisoformat(last_seen_created_at)
@@ -2406,13 +2562,16 @@ async def fetchClientProjects(
         next_ts = None
         next_id = None
 
-    return {
+    payload = {
         "projects": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
         "last_seen_created_at": next_ts,
         "last_seen_id": next_id,
     }
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 ################################################################################
@@ -2422,6 +2581,7 @@ async def fetchClientProjects(
 
 @app.post("/get-billings")
 async def getBillings(
+        request: Request,
         size: int = Query(..., gt=0, description="Number of invoices per page"),
         lastSeenCreatedAt: Optional[str] = Query(
             None,
@@ -2431,8 +2591,13 @@ async def getBillings(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
-        conn: Connection = Depends(get_conn)
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
+    size = data.get("size", size)
+    lastSeenCreatedAt = data.get("last_seen_created_at", lastSeenCreatedAt)
+    lastSeenId = data.get("last_seen_id", lastSeenId)
     if lastSeenCreatedAt:
         try:
             dt = datetime.fromisoformat(lastSeenCreatedAt)
@@ -2491,17 +2656,24 @@ async def getBillings(
         nextTs = None
         nextId = None
 
-    return {
+    payload = {
         "billings": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
         "last_seen_created_at": nextTs,
         "last_seen_id": nextId,
     }
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/get-billing-statuses")
-async def getBillingStatuses(conn: Connection = Depends(get_conn)):
+async def getBillingStatuses(
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
     sql = """
             SELECT id, value, color
             FROM status
@@ -2514,11 +2686,18 @@ async def getBillingStatuses(conn: Connection = Depends(get_conn)):
         rows = await conn.fetch(sql)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"billing_statuses": [dict(r) for r in rows]}
+    payload = {"billing_statuses": [dict(r) for r in rows]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/get-invoice-statuses")
-async def getInvoiceStatuses(conn: Connection = Depends(get_conn)):
+async def getInvoiceStatuses(
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
     sql = """
             SELECT id, value, color
               FROM status
@@ -2530,11 +2709,18 @@ async def getInvoiceStatuses(conn: Connection = Depends(get_conn)):
         rows = await conn.fetch(sql)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"invoice_statuses": [dict(r) for r in rows]}
+    payload = {"invoice_statuses": [dict(r) for r in rows]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/get-quote-statuses")
-async def getQuoteStatuses(conn: Connection = Depends(get_conn)):
+async def getQuoteStatuses(
+        request: Request,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
     sql = """
             SELECT id, value, color
               FROM status
@@ -2546,11 +2732,15 @@ async def getQuoteStatuses(conn: Connection = Depends(get_conn)):
         rows = await conn.fetch(sql)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"quote_statuses": [dict(r) for r in rows]}
+    payload = {"quote_statuses": [dict(r) for r in rows]}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/get-passwords")
 async def getPasswords(
+        request: Request,
         clientId: str = Query(..., description="Client UUID"),
         size: int = Query(..., gt=0, description="Number of passwords per page"),
         lastSeenCreatedAt: Optional[str] = Query(
@@ -2561,8 +2751,13 @@ async def getPasswords(
             None,
             description="UUID cursor to break ties if multiple rows share the same timestamp"
         ),
-        conn: Connection = Depends(get_conn)
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
+    size = data.get("size", size)
+    lastSeenCreatedAt = data.get("last_seen_created_at", lastSeenCreatedAt)
+    lastSeenUserId = data.get("last_seen_user_id", lastSeenUserId)
     if lastSeenCreatedAt:
         try:
             dt = datetime.fromisoformat(lastSeenCreatedAt)
@@ -2605,19 +2800,24 @@ async def getPasswords(
         nextTs = None
         nextId = None
 
-    return {
+    payload = {
         "passwords": [dict(r) for r in rows],
         "total_count": total,
         "page_size": size,
         "last_seen_created_at": nextTs,
         "last_seen_user_id": nextId,
     }
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/create-new-invoice")
 async def createNewInvoice(
-        payload: dict = Body(...),
-        conn: Connection = Depends(get_conn)
+        request: Request,
+        payload: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
     clientId = payload.get("clientId")
     amount = payload.get("amount")
@@ -2663,7 +2863,10 @@ async def createNewInvoice(
             documentId,
         )
 
-    return {"invoiceId": invoiceId}
+    payload_resp = {"invoiceId": invoiceId}
+    if user:
+        payload_resp = await encryptForUser(payload_resp, user.email, conn, request.app)
+    return payload_resp
 
 
 ################################################################################
@@ -2672,8 +2875,10 @@ async def createNewInvoice(
 
 @app.post("/create-new-quote")
 async def createNewQuote(
-        payload: dict = Body(...),
-        conn: Connection = Depends(get_conn)
+        request: Request,
+        payload: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
     projectId = payload.get("projectId")
     clientId = payload.get("clientId")
@@ -2720,13 +2925,19 @@ async def createNewQuote(
             documentId,
         )
 
-    return {"quoteId": quoteId}
+    payload_resp = {"quoteId": quoteId}
+    if user:
+        payload_resp = await encryptForUser(payload_resp, user.email, conn, request.app)
+    return payload_resp
 
 
 @app.post("/get-invoice")
 async def getInvoice(
+        request: Request,
         id: str = Query(..., description="Invoice UUID"),
-        conn: Connection = Depends(get_conn)
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
     sql = """
         SELECT i.*, d.file_url, d.document_type
@@ -2738,13 +2949,19 @@ async def getInvoice(
     row = await conn.fetchrow(sql, id)
     if not row:
         raise HTTPException(status_code=404, detail=f"Invoice {id} not found")
-    return {"invoice": dict(row)}
+    payload = {"invoice": dict(row)}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/get-quote")
 async def getQuote(
+        request: Request,
         id: str = Query(..., description="Quote UUID"),
-        conn: Connection = Depends(get_conn)
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)
 ):
     sql = """
         SELECT q.*, d.file_url, d.document_type
@@ -2756,7 +2973,10 @@ async def getQuote(
     row = await conn.fetchrow(sql, id)
     if not row:
         raise HTTPException(status_code=404, detail=f"Quote {id} not found")
-    return {"quote": dict(row)}
+    payload = {"quote": dict(row)}
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 ################################################################################
@@ -3118,8 +3338,8 @@ async def updateUser(data: dict = Depends(decryptPayload()), conn: Connection = 
 
     if role:
         subj = email if email else await conn.fetchval('SELECT email FROM "user" WHERE id=$1', UUID(user_id))
-        await save_role_mapping(subj, role.replace(' ', '_').lower(), delete=True)
-        await save_role_mapping(subj, role.replace(' ', '_').lower())
+        await save_role_mapping(conn, subj, role.replace(' ', '_').lower(), delete=True)
+        await save_role_mapping(conn, subj, role.replace(' ', '_').lower())
 
     return {"status": "updated"}
 
@@ -3307,14 +3527,14 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
             )
 
             role = accountType.replace(" ", "_").lower()
-            await save_role_mapping(userEmail, role)
+            await save_role_mapping(conn, userEmail, role)
             if assign_to and role == "client_technician":
                 await conn.execute(
                     "INSERT INTO client_admin_technician (client_admin_email, technician_email) VALUES ($1,$2) ON CONFLICT DO NOTHING",
                     assign_to,
                     userEmail,
                 )
-                await save_role_mapping(assign_to, "client_admin_technician", userEmail)
+                await save_role_mapping(conn, assign_to, "client_admin_technician", userEmail)
 
         digest_b64 = data.get("digest")
         salt_b64 = data.get("salt")
@@ -3406,7 +3626,12 @@ async def setRecoveryPhrase(request: Request, data: dict = Depends(decryptPayloa
 
 
 @app.post("/auth/get-recovery-params")
-async def getRecoveryParams(email: str, conn: Connection = Depends(get_conn)):
+async def getRecoveryParams(
+        request: Request,
+        email: str,
+        data: dict = Depends(decryptPayload()),
+        conn: Connection = Depends(get_conn),
+        user: SimpleUser = Depends(getCurrentUser)):
     row = await conn.fetchrow(
         """
         SELECT u.id, p.salt, p.kdf_params
@@ -3418,11 +3643,14 @@ async def getRecoveryParams(email: str, conn: Connection = Depends(get_conn)):
     )
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
-    return {
+    payload = {
         "userId": str(row["id"]),
         "salt": base64.b64encode(row["salt"]).decode(),
         "kdfParams": base64.b64encode(row["kdf_params"].encode()).decode(),
     }
+    if user:
+        payload = await encryptForUser(payload, user.email, conn, request.app)
+    return payload
 
 
 @app.post("/auth/update-client-key")
